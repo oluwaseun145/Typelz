@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Typelz - Voice bar states</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  /* inlined from theme.css so the page renders standalone */
+  :root {
+    --bg: #0b0e11; --surface: #12161b; --surface-2: #1a2027; --inset: #0e1114;
+    --border: #232b34; --border-strong: #313b46;
+    --text: #e8edf2; --muted: #9aa5b1; --faint: #5b6672;
+    --accent: #2dd4bf; --accent-dim: #14b8a6; --accent-ink: #04211d; --accent-glow: rgba(45, 212, 191, 0.16);
+    --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --vb-track: #232b34; --vb-fill: var(--accent);
+    --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+    --radius: 10px; --radius-sm: 6px;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    padding: var(--space-6);
+  }
+  h1 { font-size: 15px; font-weight: 600; color: var(--muted); margin-bottom: var(--space-6); }
+  .state-label { font-size: 12px; color: var(--faint); margin: var(--space-5) 0 var(--space-2); }
+  .state-label:first-of-type { margin-top: 0; }
+
+  /* the overlay itself - what actually floats near the screen edge */
+  .voicebar {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: var(--space-3) var(--space-4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  }
+  .voicebar.recording { border-color: var(--accent-dim); box-shadow: 0 0 0 3px var(--accent-glow), 0 8px 32px rgba(0,0,0,.5); }
+
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+  .dot.pulse { animation: pulse 1.2s ease-in-out infinite; }
+  .dot.proc { background: var(--warn); animation: pulse 0.8s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* live audio level meter - bars, not a word list (no live partials in v1) */
+  .meter { display: flex; align-items: center; gap: 3px; height: 22px; }
+  .meter span {
+    width: 3px; border-radius: 2px;
+    background: var(--vb-fill);
+  }
+  .meter span:nth-child(1) { height: 8px; }
+  .meter span:nth-child(2) { height: 16px; }
+  .meter span:nth-child(3) { height: 22px; }
+  .meter span:nth-child(4) { height: 12px; }
+  .meter span:nth-child(5) { height: 19px; }
+  .meter span:nth-child(6) { height: 10px; }
+  .meter span:nth-child(7) { height: 15px; opacity: 0.45; }
+  .meter span:nth-child(8) { height: 6px; opacity: 0.3; }
+
+  .label { font-size: 13px; font-weight: 500; }
+  .label.muted { color: var(--muted); font-weight: 400; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--inset);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11px; color: var(--muted);
+  }
+  .chip .model { color: var(--text); font-family: var(--font-mono); }
+  .chip .ok-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+
+  .hint { font-size: 11px; color: var(--faint); margin-top: var(--space-2); }
+  kbd {
+    font-family: var(--font-mono); font-size: 10px;
+    background: var(--inset); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); padding: 1px 6px; color: var(--muted);
+  }
+  .done .label { color: var(--ok); }
+</style>
+</head>
+<body>
+  <h1>Voice bar - the three states (what floats near the screen edge)</h1>
+
+  <div class="state-label">1. Recording (toggle pressed, voice active - accent glow)</div>
+  <div>
+    <div class="voicebar recording">
+      <span class="dot pulse"></span>
+      <div class="meter"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      <span class="label">Listening</span>
+      <span class="chip"><span class="ok-dot"></span>OpenAI <span class="model">gpt-4o-mini</span></span>
+    </div>
+    <div class="hint">press <kbd>Right Alt</kbd> to stop and insert</div>
+  </div>
+
+  <div class="state-label">2. Processing (transcribing locally, then LLM cleanup)</div>
+  <div>
+    <div class="voicebar">
+      <span class="dot proc"></span>
+      <span class="label muted">Cleaning up&hellip;</span>
+      <span class="chip"><span class="ok-dot"></span>OpenAI <span class="model">gpt-4o-mini</span></span>
+    </div>
+    <div class="hint">Parakeet INT8 + one LLM round-trip, a few seconds on CPU</div>
+  </div>
+
+  <div class="state-label">3. Done (text inserted, bar dismisses after ~600 ms)</div>
+  <div>
+    <div class="voicebar done">
+      <span class="dot" style="background: var(--ok)"></span>
+      <span class="label">Inserted 42 words</span>
+    </div>
+    <div class="hint">no live word-by-word text in v1 - level + state only</div>
+  </div>
+</body>
+</html>

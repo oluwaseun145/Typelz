@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Typelz - Settings</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  /* inlined from theme.css so the page renders standalone */
+  :root {
+    --bg: #0b0e11; --surface: #12161b; --surface-2: #1a2027; --inset: #0e1114;
+    --border: #232b34; --border-strong: #313b46;
+    --text: #e8edf2; --muted: #9aa5b1; --faint: #5b6672;
+    --accent: #2dd4bf; --accent-dim: #14b8a6; --accent-ink: #04211d; --accent-glow: rgba(45, 212, 191, 0.16);
+    --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --vb-track: #232b34; --vb-fill: var(--accent);
+    --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+    --radius: 10px; --radius-sm: 6px;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .window {
+    width: 860px; height: 560px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  }
+
+  /* sidebar */
+  .nav {
+    width: 200px;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    padding: var(--space-4) var(--space-3);
+    display: flex; flex-direction: column;
+  }
+  .brand { font-size: 13px; font-weight: 700; letter-spacing: 0.04em; color: var(--text); padding: 0 var(--space-2) var(--space-4); }
+  .brand em { color: var(--accent); font-style: normal; }
+  .nav-item {
+    font-size: 13px; color: var(--muted);
+    padding: 7px var(--space-2);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    margin-bottom: 2px;
+  }
+  .nav-item:hover { background: var(--surface-2); color: var(--text); }
+  .nav-item.active { background: var(--accent-glow); color: var(--accent); font-weight: 500; }
+  .nav-section { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); padding: var(--space-4) var(--space-2) var(--space-2); }
+
+  /* main pane */
+  .pane { flex: 1; padding: var(--space-5) var(--space-6); overflow-y: auto; }
+  .pane h2 { font-size: 16px; font-weight: 600; margin-bottom: var(--space-2); }
+  .pane .sub { font-size: 12px; color: var(--muted); margin-bottom: var(--space-5); }
+
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+  .card h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-3); }
+
+  .row { display: flex; align-items: center; justify-content: space-between; padding: var(--space-2) 0; font-size: 13px; }
+  .row + .row { border-top: 1px solid var(--border); }
+  .row .k { color: var(--text); }
+  .row .d { font-size: 11px; color: var(--faint); margin-top: 2px; }
+
+  select, .select {
+    background: var(--inset); color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 12px; padding: 5px 10px;
+    font-family: var(--font-sans);
+  }
+  .select .caret { color: var(--faint); }
+
+  /* input level meter */
+  .level {
+    display: flex; align-items: center; gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+  .level .track {
+    flex: 1; height: 6px; border-radius: 3px; background: var(--vb-track);
+    overflow: hidden;
+  }
+  .level .fill { width: 62%; height: 100%; background: var(--accent); border-radius: 3px; }
+  .level .val { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+
+  /* hotkey chip */
+  kbd {
+    font-family: var(--font-mono); font-size: 11px;
+    background: var(--inset); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); padding: 3px 8px; color: var(--text);
+  }
+
+  /* toggle */
+  .toggle {
+    width: 34px; height: 19px; border-radius: 999px;
+    background: var(--border-strong); position: relative; flex: none;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 15px; height: 15px; border-radius: 50%; background: var(--muted);
+  }
+  .toggle.on { background: var(--accent-dim); }
+  .toggle.on::after { left: 17px; background: var(--accent-ink); }
+
+  .badge {
+    font-size: 10px; font-weight: 600;
+    border-radius: 999px; padding: 2px 8px;
+  }
+  .badge.ok { background: rgba(74, 222, 128, 0.12); color: var(--ok); }
+  .badge.info { background: var(--accent-glow); color: var(--accent); }
+
+  .status-line { display: flex; align-items: center; gap: var(--space-2); font-size: 12px; color: var(--muted); margin-top: var(--space-2); }
+  .status-line .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+</style>
+</head>
+<body>
+  <div class="window">
+    <aside class="nav">
+      <div class="brand">Type<em>lz</em></div>
+      <div class="nav-item active">Microphone</div>
+      <div class="nav-item">LLM Providers</div>
+      <div class="nav-item">Cleanup &amp; Style</div>
+      <div class="nav-item">Shortcuts</div>
+      <div class="nav-section">System</div>
+      <div class="nav-item">Model &amp; Diagnostics</div>
+      <div class="nav-item">About</div>
+    </aside>
+
+    <main class="pane">
+      <h2>Microphone</h2>
+      <div class="sub">Input device and the global dictation controls.</div>
+
+      <div class="card">
+        <h3>Input</h3>
+        <div class="row">
+          <div>
+            <div class="k">Microphone</div>
+            <div class="d">Used for all dictation</div>
+          </div>
+          <select class="select"><option>Microphone Array (Realtek)</option></select>
+        </div>
+        <div class="row" style="display:block">
+          <div class="row" style="border:none; padding: 0">
+            <div class="k">Input level</div>
+            <span class="badge ok">Good</span>
+          </div>
+          <div class="level">
+            <div class="track"><div class="fill"></div></div>
+            <span class="val">-18 dB</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Dictation controls</h3>
+        <div class="row">
+          <div>
+            <div class="k">Toggle-to-talk</div>
+            <div class="d">Default - press once to start, press again to insert</div>
+          </div>
+          <kbd>Right Alt</kbd>
+        </div>
+        <div class="row">
+          <div>
+            <div class="k">Push-to-talk</div>
+            <div class="d">Hold to record, release to insert</div>
+          </div>
+          <kbd>None</kbd>
+        </div>
+        <div class="row">
+          <div>
+            <div class="k">Cancel recording</div>
+            <div class="d">Discard the current utterance</div>
+          </div>
+          <kbd>Esc</kbd>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Cleanup</h3>
+        <div class="row">
+          <div class="k">Remove fillers &amp; false starts</div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="row">
+          <div class="k">Add punctuation &amp; capitalization</div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="k">Auto-format lists &amp; structure</div>
+            <div class="d">Spoken lists become bullets, steps, headings</div>
+          </div>
+          <div class="toggle on"></div>
+        </div>
+        <div class="row">
+          <div class="k">Interaction sound</div>
+          <div class="toggle"></div>
+        </div>
+        <div class="status-line"><span class="dot"></span>Active provider: <strong>OpenAI</strong> - <span style="font-family:var(--font-mono)">gpt-4o-mini</span> <span class="badge info">BYOK</span></div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

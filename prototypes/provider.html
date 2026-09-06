@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Typelz - Provider setup</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  /* inlined from theme.css so the page renders standalone */
+  :root {
+    --bg: #0b0e11; --surface: #12161b; --surface-2: #1a2027; --inset: #0e1114;
+    --border: #232b34; --border-strong: #313b46;
+    --text: #e8edf2; --muted: #9aa5b1; --faint: #5b6672;
+    --accent: #2dd4bf; --accent-dim: #14b8a6; --accent-ink: #04211d; --accent-glow: rgba(45, 212, 191, 0.16);
+    --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --vb-track: #232b34; --vb-fill: var(--accent);
+    --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+    --radius: 10px; --radius-sm: 6px;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .window {
+    width: 860px; height: 600px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  }
+
+  .nav {
+    width: 200px;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    padding: var(--space-4) var(--space-3);
+  }
+  .brand { font-size: 13px; font-weight: 700; letter-spacing: 0.04em; padding: 0 var(--space-2) var(--space-4); }
+  .brand em { color: var(--accent); font-style: normal; }
+  .nav-item {
+    font-size: 13px; color: var(--muted);
+    padding: 7px var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-bottom: 2px;
+  }
+  .nav-item.active { background: var(--accent-glow); color: var(--accent); font-weight: 500; }
+  .nav-section { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); padding: var(--space-4) var(--space-2) var(--space-2); }
+
+  .pane { flex: 1; padding: var(--space-5) var(--space-6); overflow-y: auto; }
+  .pane h2 { font-size: 16px; font-weight: 600; margin-bottom: var(--space-2); }
+  .pane .sub { font-size: 12px; color: var(--muted); margin-bottom: var(--space-5); }
+
+  /* provider list */
+  .list { margin-bottom: var(--space-5); }
+  .prow {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-2);
+    font-size: 13px;
+  }
+  .prow.active { border-color: var(--accent-dim); box-shadow: 0 0 0 2px var(--accent-glow); }
+  .prow .name { font-weight: 500; }
+  .prow .model { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-left: var(--space-2); }
+  .prow .meta { display: flex; align-items: center; gap: var(--space-2); font-size: 11px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+  .dot.off { background: var(--faint); }
+  .badge { font-size: 10px; font-weight: 600; border-radius: 999px; padding: 2px 8px; }
+  .badge.active { background: var(--accent-glow); color: var(--accent); }
+  .badge.err { background: rgba(248, 113, 113, 0.12); color: var(--err); }
+
+  /* form */
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+  .card h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-3); }
+  .field { margin-bottom: var(--space-3); }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: var(--space-1); }
+  .field input, .field select {
+    width: 100%;
+    background: var(--inset); color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 13px; padding: 8px 10px;
+    font-family: var(--font-sans);
+  }
+  .field input.mono { font-family: var(--font-mono); font-size: 12px; }
+  .field .hint { font-size: 11px; color: var(--faint); margin-top: var(--space-1); }
+  .field .hint.err { color: var(--err); }
+  .field input.invalid { border-color: var(--err); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+
+  .btn {
+    font-family: var(--font-sans); font-size: 13px; font-weight: 500;
+    border-radius: var(--radius-sm);
+    padding: 8px 16px; cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2); color: var(--text);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.ghost { background: transparent; }
+  .actions { display: flex; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }
+  .actions .status { font-size: 12px; margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+  .actions .status.ok { color: var(--ok); }
+  .actions .status.err { color: var(--err); }
+
+  .locknote {
+    display: flex; gap: var(--space-2);
+    font-size: 11px; color: var(--faint);
+    padding: var(--space-2) var(--space-3);
+    background: var(--inset);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-3);
+  }
+  .locknote .k { color: var(--muted); font-weight: 500; }
+</style>
+</head>
+<body>
+  <div class="window">
+    <aside class="nav">
+      <div class="brand">Type<em>lz</em></div>
+      <div class="nav-item">Microphone</div>
+      <div class="nav-item active">LLM Providers</div>
+      <div class="nav-item">Cleanup &amp; Style</div>
+      <div class="nav-item">Shortcuts</div>
+      <div class="nav-section">System</div>
+      <div class="nav-item">Model &amp; Diagnostics</div>
+      <div class="nav-item">About</div>
+    </aside>
+
+    <main class="pane">
+      <h2>LLM Providers</h2>
+      <div class="sub">Bring your own keys. Typelz never stores a key outside the OS keychain, and audio never leaves this machine.</div>
+
+      <div class="list">
+        <div class="prow active">
+          <div>
+            <span class="dot ok"></span>
+            <span class="name" style="margin-left: var(--space-2)">OpenAI</span>
+            <span class="model">gpt-4o-mini</span>
+          </div>
+          <div class="meta">
+            <span>validated 2h ago</span>
+            <span class="badge active">Active</span>
+          </div>
+        </div>
+        <div class="prow">
+          <div>
+            <span class="dot err"></span>
+            <span class="name" style="margin-left: var(--space-2)">Groq</span>
+            <span class="model">llama-3.3-70b</span>
+          </div>
+          <div class="meta">
+            <span>invalid API key</span>
+            <span class="badge err">Error</span>
+          </div>
+        </div>
+        <div class="prow">
+          <div>
+            <span class="dot off"></span>
+            <span class="name" style="margin-left: var(--space-2)">Custom (OpenAI-compatible)</span>
+            <span class="model">localhost:11434</span>
+          </div>
+          <div class="meta"><span>not validated</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Add provider</h3>
+        <div class="locknote">
+          <span class="k">Keychain:</span>
+          <span>the key is written to the Windows Credential Manager, never to app data or logs.</span>
+        </div>
+        <div class="field">
+          <label>Provider type</label>
+          <select><option>OpenAI-compatible endpoint</option></select>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label>Base URL</label>
+            <input class="mono" value="https://api.openai.com/v1">
+            <div class="hint">Any OpenAI-compatible API works</div>
+          </div>
+          <div class="field">
+            <label>API key</label>
+            <input class="mono" type="password" value="sk-proj-x7f9...masked" readonly>
+            <div class="hint">Stored in OS keychain - never shown again after save</div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Default model</label>
+          <select><option>gpt-4o-mini</option></select>
+          <div class="hint">Used for dictation cleanup unless a task routes elsewhere</div>
+        </div>
+        <div class="actions">
+          <button class="btn primary">Validate</button>
+          <button class="btn">Save provider</button>
+          <button class="btn ghost">Cancel</button>
+          <span class="status ok"><span class="dot ok"></span>Connected - 42 ms, model responds</span>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,48 @@
+/* Typelz theme - the durable output of /prototype.
+   Dark, minimal, unobtrusive. Single teal/cyan accent reserved for
+   "voice is active" and primary actions. Port this block into the real
+   app's globals.css @theme when building the first UI feature. */
+
+:root {
+  /* surfaces */
+  --bg: #0b0e11;           /* page background        */
+  --surface: #12161b;      /* cards, panels          */
+  --surface-2: #1a2027;    /* raised elements, hover */
+  --inset: #0e1114;        /* wells, code, key chips */
+  --border: #232b34;
+  --border-strong: #313b46;
+
+  /* text */
+  --text: #e8edf2;         /* primary            */
+  --muted: #9aa5b1;        /* secondary, labels  */
+  --faint: #5b6672;        /* hints, placeholders */
+
+  /* accent (teal/cyan - voice active, primary action) */
+  --accent: #2dd4bf;
+  --accent-dim: #14b8a6;
+  --accent-ink: #04211d;   /* text on accent     */
+  --accent-glow: rgba(45, 212, 191, 0.16);
+
+  /* states */
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+
+  /* voice bar */
+  --vb-track: #232b34;     /* level meter track   */
+  --vb-fill: var(--accent);
+
+  /* type */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+
+  /* scale */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+}
