@@ -7,7 +7,11 @@ this file, so there is a single source of truth.
 
 ## What this is
 
-A description of your project and the problem it solves.
+Typelz is a system-wide AI voice dictation application for Windows and Linux.
+Speech recognition (Parakeet) runs locally; a user-configured BYOK LLM cleans
+and formats the transcript, which is inserted into the active application.
+The desktop app is Vue 3 + TypeScript built with Vite, with a planned Tauri
+(Rust) native layer for microphone capture, text insertion, and hotkeys.
 
 This project is built with the **AI Blueprint**, a workflow layer, not an
 app skeleton. To start a new project, scaffold the app first in an empty folder
@@ -224,15 +228,11 @@ checks do not make the Blueprint unusable.
 
 ## Commands
 
-<!-- blueprint:onboarding-required -->
-For a standard Next.js project. Change or remove if you're using something else.
+- Dev server: `npm run dev` (http://localhost:5173)
+- Build: `npm run build` (vue-tsc typecheck, then Vite production build)
+- Preview production build: `npm run preview`
 
-- Dev server: `npm run dev` (http://localhost:3000)
-- Build: `npm run build`
-- Production server: `npm run start`
-- Lint: `npm run lint`
-
-Testing is opt-in. If this project does not already have a unit test runner, run
+There is no `lint` or `test` command yet. Testing is opt-in. If this project
 `/tests` or `$tests` to add one and update this section with the real test
 commands.
 

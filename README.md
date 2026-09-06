@@ -1,5 +1,18 @@
-# Vue 3 + TypeScript + Vite
+# Typelz
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+System-wide AI voice dictation for Windows and Linux: local Parakeet speech
+recognition plus a BYOK LLM that cleans and formats your speech before it is
+inserted into the active application.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+> TODO: expand once the project plan is finalized and the first features land.
+
+## Commands
+
+- Dev server: `npm run dev` (http://localhost:5173)
+- Build: `npm run build`
+- Preview production build: `npm run preview`
+
+## Stack
+
+Vue 3 + TypeScript + Vite. A Tauri (Rust) native layer is planned for
+microphone capture, global hotkeys, and system-wide text insertion.
