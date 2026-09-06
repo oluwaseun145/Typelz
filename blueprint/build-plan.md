@@ -3,7 +3,7 @@
 ## v1: Daily-use release (Windows)
 
 - [x] 1. **Desktop application shell** - establish the Vue + TypeScript desktop application and Tauri integration (tray icon, settings window, typed command/event channel)
-- [ ] 2. **Microphone capture** - capture microphone audio reliably with start, stop, and device selection
+- [x] 2. **Microphone capture** - capture microphone audio reliably with start, stop, and device selection
 - [ ] 3. **Parakeet transcription** - run Parakeet TDT v3 INT8 locally via ONNX Runtime on CPU with VAD-gated utterance detection, lazy model load, and one-time model download
 - [ ] 4. **BYOK provider configuration** - let users add, validate, edit, and remove their own LLM provider credentials in the OS keychain
 - [ ] 5. **LLM provider abstraction** - provide a common interface for models, OpenAI-compatible chat completion first
