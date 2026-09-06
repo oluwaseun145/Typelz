@@ -23,11 +23,6 @@
       "csp": null
     }
   },
-  "trayIcon": {
-    "iconPath": "icons/tray-icon.png",
-    "id": "typelz-tray",
-    "tooltip": "Typelz"
-  },
   "bundle": {
     "active": true,
     "targets": "all",
