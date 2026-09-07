@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc, Mutex};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -143,6 +144,21 @@ fn f32_to_i16_le(samples: &[f32]) -> Vec<u8> {
     out
 }
 
+/// Averages interleaved multi-channel f32 samples down to mono.
+///
+/// cpal delivers frames interleaved per channel (L, R, C, S, L, R, ...).
+/// Treating that stream as mono time-stretches and scrambles the audio, so
+/// multi-channel devices must be downmixed before VAD or inference.
+fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return interleaved.to_vec();
+    }
+    interleaved
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
 /// Atomically detaches everything queued since the last drain.
 fn drain(queue: &Mutex<VecDeque<Vec<u8>>>) -> VecDeque<Vec<u8>> {
     let mut q = queue.lock().unwrap();
@@ -151,16 +167,28 @@ fn drain(queue: &Mutex<VecDeque<Vec<u8>>>) -> VecDeque<Vec<u8>> {
     empty
 }
 
+/// Minimum utterance length, in 16 kHz mono samples, before inference.
+/// WebRTC VAD can fire on short noise blips (~0.1-0.3 s); those would be sent
+/// to the model and can produce random fragments, so shorter segments are
+/// skipped. 300 ms keeps real short phrases while dropping blips.
+const MIN_UTTERANCE_SAMPLES_16K: usize = 4800;
+
 /// Emits `utterance-ready`, then routes the utterance through the
-/// transcription engine when one is loaded, emitting `transcription-result`
-/// (or `microphone-error` on inference failure). Runs on the forwarding
-/// thread, not the real-time audio callback (F-21, F-23).
+/// transcription engine when one is loaded (skipping sub-300 ms noise blips).
+/// The session transcript is delivered once at stop time, not per utterance.
+/// Runs on the forwarding thread, not the real-time audio callback (F-21, F-23).
 fn handle_utterance(
     app: &tauri::AppHandle,
     engine: &Mutex<Option<TranscriptionEngine>>,
     pcm: &[u8],
 ) {
     use tauri::Emitter;
+
+    let samples = pcm.len() / 2; // i16 LE
+    if samples < MIN_UTTERANCE_SAMPLES_16K {
+        eprintln!("[typelz] skip: utterance too short (~{:.2}s)", samples as f64 / 16000.0);
+        return;
+    }
 
     let _ = app.emit(
         "utterance-ready",
@@ -174,8 +202,9 @@ fn handle_utterance(
         return;
     };
     match eng.transcribe(pcm) {
-        Ok(transcript) => {
-            let _ = app.emit("transcription-result", TranscriptionResult { transcript });
+        Ok(_transcript) => {
+            // Accumulated in the engine's session transcript; the stop
+            // command/return value delivers the full recording's text.
         }
         Err(e) => {
             eprintln!("Transcription failed: {e}");
@@ -210,6 +239,12 @@ pub fn start_capture(
     let config = device.default_input_config()
         .map_err(|e| format!("Failed to get default input config: {}", e))?;
 
+    // The downstream pipeline (resampler, VAD, Parakeet) is mono-only, but a
+    // device's default config can be multi-channel (e.g. the 4-channel
+    // Realtek mic on this machine). Interleaved channels read as mono are
+    // time-stretched and scrambled, so the callback downmixes when needed.
+    let native_channels = config.channels();
+
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
     const MAX_FRAMES: usize = 8;
@@ -224,6 +259,9 @@ pub fn start_capture(
     let app_for_loop = app.clone();
     // Single owner, moved into the stream callback that cpal invokes serially.
     let mut vad = Some(VadDetector::new());
+    // Tracks the current speech run so the trace prints transitions only,
+    // not every callback frame.
+    let in_speech = Cell::new(false);
 
     let handle = std::thread::spawn(move || {
         use cpal::traits::DeviceTrait;
@@ -240,7 +278,7 @@ pub fn start_capture(
             &config.into(),
             sample_format,
             move |data, _info| {
-                let f32_samples: Vec<f32> = match data.as_slice::<f32>() {
+                let raw_samples: Vec<f32> = match data.as_slice::<f32>() {
                     Some(slice) => slice.to_vec(),
                     None => match data.as_slice::<i16>() {
                         Some(slice) => slice.iter().map(|&s| s as f32 / 32768.0).collect(),
@@ -249,6 +287,14 @@ pub fn start_capture(
                             None => vec![],
                         },
                     },
+                };
+                // Multi-channel devices deliver interleaved frames; the
+                // pipeline is mono-only, so downmix instead of feeding
+                // scrambled channel data into the VAD and model.
+                let f32_samples = if native_channels == 1 {
+                    raw_samples
+                } else {
+                    downmix_to_mono(&raw_samples, native_channels as usize)
                 };
 
                 let bytes: Vec<u8> = f32_samples.iter()
@@ -278,24 +324,42 @@ pub fn start_capture(
                     if let Ok(mut buf) = buffer_clone.lock() {
                         buf.clear();
                     }
+                    in_speech.set(false);
                     return;
                 }
 
                 match state {
                     VadState::Speeching => {
                         let mut buf = buffer_clone.lock().unwrap();
+                        if !in_speech.get() {
+                            in_speech.set(true);
+                            eprintln!("[typelz] VAD: speech start");
+                        }
                         buf.extend_from_slice(&resampled);
                     }
                     VadState::Boundary => {
-                        let buf = buffer_clone.lock().unwrap();
-                        if !buf.is_empty() {
-                            let mut q = utterance_queue_clone.lock().unwrap();
-                            while q.len() >= MAX_UTTERANCES {
-                                q.pop_front();
+                        let utterance_seconds = {
+                            let mut buf = buffer_clone.lock().unwrap();
+                            if !buf.is_empty() {
+                                let seconds = buf.len() as f64 / 16000.0;
+                                let mut q = utterance_queue_clone.lock().unwrap();
+                                while q.len() >= MAX_UTTERANCES {
+                                    q.pop_front();
+                                }
+                                q.push_back(f32_to_i16_le(&buf));
+                                // Clear the buffer so the next utterance starts
+                                // fresh; without this, every subsequent boundary
+                                // re-queues the entire accumulated audio.
+                                buf.clear();
+                                Some(seconds)
+                            } else {
+                                None
                             }
-                            q.push_back(f32_to_i16_le(&buf));
+                        };
+                        if let Some(seconds) = utterance_seconds {
+                            eprintln!("[typelz] VAD: utterance end (~{seconds:.2}s)");
                         }
-                        drop(buf);
+                        in_speech.set(false);
                         vad.reset();
                     }
                     VadState::Silent => {}
@@ -329,6 +393,13 @@ pub fn start_capture(
             return;
         }
 
+        eprintln!(
+            "[typelz] capture started: {} Hz, native_channels={}, mode={}",
+            device_sample_rate,
+            native_channels,
+            if native_channels == 1 { "device-mono" } else { "downmixed-mono" },
+        );
+
         loop {
             let frames = drain(&frame_queue);
             let utterances = drain(&utterance_queue);
@@ -354,6 +425,20 @@ pub fn start_capture(
         // drop; process it so stopping returns the last transcript too.
         for pcm in drain(&utterance_queue) {
             handle_utterance(&app_for_loop, &engine, &pcm);
+        }
+
+        // Flush any speech still sitting in the utterance buffer that never
+        // reached a VAD Boundary (e.g. user was still speaking when Stop was
+        // pressed). Without this, continuous speech with no pause is lost.
+        {
+            let buf = utterance_buffer.lock().unwrap();
+            if !buf.is_empty() {
+                let seconds = buf.len() as f64 / 16000.0;
+                let pcm = f32_to_i16_le(&buf);
+                drop(buf);
+                eprintln!("[typelz] flush: final utterance (~{seconds:.2}s)");
+                handle_utterance(&app_for_loop, &engine, &pcm);
+            }
         }
 
     });
@@ -422,5 +507,32 @@ mod tests {
         let pcm = f32_to_i16_le(&[2.0, -3.0]);
         assert_eq!(pcm, vec![0xff, 0x7f, 0x01, 0x80]);
         assert_eq!(pcm.len(), 4);
+    }
+
+    #[test]
+    fn test_downmix_to_mono_two_channels() {
+        // Interleaved L,R frames: (1,-1) averages to 0, (0.5,0.5) to 0.5.
+        let out = downmix_to_mono(&[1.0, -1.0, 0.5, 0.5], 2);
+        assert_eq!(out, vec![0.0, 0.5]);
+    }
+
+    #[test]
+    fn test_downmix_to_mono_four_channels() {
+        // The 4-channel case this machine's Realtek mic hits.
+        let out = downmix_to_mono(&[1.0, 1.0, 1.0, 1.0, -0.5, -0.5, -0.5, -0.5], 4);
+        assert_eq!(out, vec![1.0, -0.5]);
+    }
+
+    #[test]
+    fn test_downmix_to_mono_passthrough_single_channel() {
+        let input = vec![0.25, -0.75, 1.0];
+        assert_eq!(downmix_to_mono(&input, 1), input);
+    }
+
+    #[test]
+    fn test_downmix_to_mono_drops_trailing_partial_frame() {
+        // A trailing value that does not complete a channel frame is dropped.
+        let out = downmix_to_mono(&[1.0, 1.0, 0.5], 2);
+        assert_eq!(out, vec![1.0]);
     }
 }

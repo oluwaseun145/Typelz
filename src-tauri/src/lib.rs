@@ -30,43 +30,59 @@ fn list_microphone_devices() -> Vec<audio::MicrophoneDevice> {
 }
 
 /// Start capture on a specific device (by index ID from the device list).
+///
+/// Async so the device validation and the (potentially slow) stop-join of a
+/// previous capture run off the UI thread.
 #[tauri::command]
-fn start_capture(
+async fn start_capture(
     app: tauri::AppHandle,
     device_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let index: usize = device_id.parse().map_err(|_| format!("Invalid device ID: {device_id}"))?;
 
-    // Validate that the device exists before proceeding.
-    let host = cpal::default_host();
-    let devices = host.input_devices()
-        .map_err(|e| format!("Failed to list input devices: {e}"))?;
-    if !devices.enumerate().any(|(i, _)| i == index) {
-        return Err(format!("Microphone device not found at index: {index}"));
-    }
-
-    stop_existing_capture(&state);
-
+    // Take the previous capture handles out before blocking so stop+join run
+    // on the worker thread, not the UI thread.
+    let old_stop_tx = state.capture_stop_tx.lock().unwrap().take();
+    let old_handle = state.capture_handle.lock().unwrap().take();
     let engine = state.transcription_engine.clone();
-    let (stop_tx, handle) = audio::start_capture(app, index, engine)?;
+    let app_for_block = app.clone();
 
-    state.capture_stop_tx.lock().unwrap().replace(stop_tx);
-    state.capture_handle.lock().unwrap().replace(handle);
+    let new_capture = tauri::async_runtime::spawn_blocking(move || {
+        // Validate that the device exists before proceeding.
+        let host = cpal::default_host();
+        let devices = host.input_devices()
+            .map_err(|e| format!("Failed to list input devices: {e}"))?;
+        if !devices.enumerate().any(|(i, _)| i == index) {
+            return Err(format!("Microphone device not found at index: {index}"));
+        }
+
+        // Signal any running capture to stop and wait for it to exit before
+        // opening the next stream: the thread only exits after the signal, so
+        // the signal must go out before the join.
+        if let Some(tx) = old_stop_tx {
+            audio::stop_capture(tx);
+        }
+        if let Some(handle) = old_handle {
+            handle.join().unwrap_or_default();
+        }
+
+        audio::start_capture(app_for_block, index, engine)
+    })
+    .await
+    .map_err(|e| format!("Start capture task failed: {e}"))??;
+
+    state.capture_stop_tx.lock().unwrap().replace(new_capture.0);
+    state.capture_handle.lock().unwrap().replace(new_capture.1);
+
+    // A new recording begins with an already-loaded engine: start from an
+    // empty session so this capture's Stop transcript cannot include the
+    // previous recording.
+    if let Some(eng) = state.transcription_engine.lock().unwrap().as_ref() {
+        eng.clear_transcript();
+    }
 
     Ok(())
-}
-
-/// Signals the capture thread to stop and waits for it to exit. The stop
-/// signal must go out before the join: the thread only exits after receiving
-/// it, so joining first deadlocks when a capture is already running.
-fn stop_existing_capture(state: &AppState) {
-    if let Some(tx) = state.capture_stop_tx.lock().unwrap().take() {
-        audio::stop_capture(tx);
-    }
-    if let Some(handle) = state.capture_handle.lock().unwrap().take() {
-        handle.join().unwrap_or_default();
-    }
 }
 
 /// Check the status of the Parukeet model cache.
@@ -88,9 +104,37 @@ async fn get_model_status(state: tauri::State<'_, AppState>) -> Result<model::Mo
 
 
 /// Stop capture. Idempotent.
+///
+/// Async so the capture-thread join runs off the UI thread; a slow in-flight
+/// inference during the final flush must not freeze the window. Once the
+/// capture thread exits, a non-empty session transcript is emitted so stopping
+/// from the microphone controls also delivers the recording's transcript.
 #[tauri::command]
-fn stop_capture(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    stop_existing_capture(&state);
+async fn stop_capture(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    use tauri::Emitter;
+    let stop_tx = state.capture_stop_tx.lock().unwrap().take();
+    let capture_handle = state.capture_handle.lock().unwrap().take();
+    let engine = state.transcription_engine.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(tx) = stop_tx {
+            audio::stop_capture(tx);
+        }
+        if let Some(handle) = capture_handle {
+            handle.join().unwrap_or_default();
+        }
+        if let Some(eng) = engine.lock().unwrap().as_ref() {
+            let session = eng.session_transcript();
+            if !session.is_empty() {
+                let _ = app.emit(
+                    "transcription-result",
+                    audio::TranscriptionResult { transcript: session },
+                );
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Stop capture task failed: {e}"))?;
     Ok(())
 }
 
@@ -119,11 +163,15 @@ async fn transcribe_start(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         }
     };
 
-    let path_for_ensure = model_path.clone();
+    let path_for_block = model_path.clone();
     let app_for_progress = app.clone();
-    let status = tauri::async_runtime::spawn_blocking(move || {
-        model::ensure_on_path(
-            &path_for_ensure,
+    let engine_slot = state.transcription_engine.clone();
+
+    // Model preparation and engine load share one blocking task so the
+    // `ready` event below cannot fire until the engine actually exists.
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        let status = model::ensure_on_path(
+            &path_for_block,
             Some(&|file: &str, downloaded: u64, total: Option<u64>| {
                 let _ = app_for_progress.emit(
                     "model-status",
@@ -138,14 +186,26 @@ async fn transcribe_start(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 );
             }),
         )
+        .map_err(|e| format!("Model preparation failed: {e}"))?;
+
+        if !matches!(status, model::ModelStatus::Ready { .. }) {
+            return Err(format!("Model cache not ready: {status:?}"));
+        }
+
+        let mut engine = engine_slot.lock().unwrap();
+        if engine.is_none() {
+            *engine = Some(
+                transcribe::TranscriptionEngine::new(&path_for_block).map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(())
     })
     .await
-    .map_err(|e| format!("Model preparation task failed: {e}"))?
-    .map_err(|e| format!("Model preparation failed: {e}"))?;
+    .map_err(|e| format!("Model preparation task failed: {e}"))?;
+    prepared?;
 
-    if !matches!(status, model::ModelStatus::Ready { .. }) {
-        return Err(format!("Model cache not ready: {status:?}"));
-    }
+    // The engine is loaded by now, so the frontend can start capturing
+    // without dropping early utterances.
     let _ = app.emit(
         "model-status",
         model::ModelStatusEvent {
@@ -155,25 +215,41 @@ async fn transcribe_start(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         },
     );
 
-    let mut engine = state.transcription_engine.lock().unwrap();
-    if engine.is_none() {
-        *engine = Some(
-            transcribe::TranscriptionEngine::new(&model_path).map_err(|e| e.to_string())?,
-        );
+    // New session: clear the previous recording's result so it cannot be
+    // mistaken for the upcoming capture's transcript.
+    if let Some(eng) = state.transcription_engine.lock().unwrap().as_ref() {
+        eng.clear_transcript();
     }
 
     Ok(())
 }
 
-/// Stop capture (flushing any final utterance) and return the latest
-/// transcript produced by the engine.
+/// Stop capture (flushing any final utterance) and return the transcript of
+/// the whole session — every utterance recorded since the last session clear,
+/// not just the final fragment.
+///
+/// This command is async so that the blocking capture-thread join and any
+/// in-flight inference run on a worker thread instead of freezing the UI.
 #[tauri::command]
-fn transcribe_stop(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    stop_existing_capture(&state);
-    match state.transcription_engine.lock().unwrap().as_ref() {
-        Some(eng) => Ok(eng.last_transcript().unwrap_or_default()),
-        None => Err("Transcription engine not initialized".to_string()),
-    }
+async fn transcribe_stop(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let stop_tx = state.capture_stop_tx.lock().unwrap().take();
+    let capture_handle = state.capture_handle.lock().unwrap().take();
+    let engine = state.transcription_engine.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(tx) = stop_tx {
+            audio::stop_capture(tx);
+        }
+        if let Some(handle) = capture_handle {
+            handle.join().unwrap_or_default();
+        }
+        match engine.lock().unwrap().as_ref() {
+            Some(eng) => Ok(eng.session_transcript()),
+            None => Err("Transcription engine not initialized".to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("Transcribe stop task failed: {e}"))?
 }
 
 struct AppState {

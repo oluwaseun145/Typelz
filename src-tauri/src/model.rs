@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -208,8 +209,8 @@ pub fn ensure_on_path(
 /// Synchronous model download with a 5-minute timeout per request.
 /// Files already present in `cache_dir` are skipped, so an interrupted
 /// download resumes rather than restarting. Each file is streamed to a
-/// `.partial` temp file and renamed into place so a failure never leaves a
-/// truncated file that looks like a valid cache entry.
+/// `.partial` temp file with HTTP Range resume support and renamed into place
+/// once complete and verified, so failures never leave a truncated file that looks like a valid cache entry.
 pub fn download_model_sync(
     cache_dir: &Path,
     on_progress: Option<&dyn Fn(&str, u64, Option<u64>)>,
@@ -229,43 +230,93 @@ pub fn download_model_sync(
         }
 
         let url = download_url(file_name);
-        eprintln!("Downloading {file_name}...");
-        if let Some(p) = on_progress {
-            p(file_name, 0, None);
+        let tmp = cache_dir.join(format!("{file_name}.partial"));
+
+        let mut existing_bytes: u64 = 0;
+        if tmp.exists() {
+            if let Ok(metadata) = std::fs::metadata(&tmp) {
+                existing_bytes = metadata.len();
+            }
         }
 
-        let mut resp = client
-            .get(&url)
+        eprintln!("Downloading {file_name} (resuming from {existing_bytes} bytes)...");
+        if let Some(p) = on_progress {
+            p(file_name, existing_bytes, None);
+        }
+
+        let mut req = client.get(&url);
+        if existing_bytes > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={existing_bytes}-"));
+        }
+
+        let mut resp = req
             .send()
             .map_err(|e| format!("Failed to download {file_name}: {e}"))?;
 
-        if !resp.status().is_success() {
-            return Err(format!("Failed to download {file_name}: HTTP {}", resp.status()));
-        }
-        let total = resp.content_length();
-
-        let tmp = cache_dir.join(format!("{file_name}.partial"));
-        let mut file = std::fs::File::create(&tmp)
-            .map_err(|e| format!("Failed to create {}: {e}", tmp.display()))?;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut written: u64 = 0;
-        let mut last_report: u64 = 0;
-        loop {
-            let n = resp
-                .read(&mut buf)
-                .map_err(|e| format!("Failed to download {file_name}: {e}"))?;
-            if n == 0 {
-                break;
+        let status = resp.status();
+        let (mut file, mut written, total) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            // Server honored Range request
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&tmp)
+                .map_err(|e| format!("Failed to open {} in append mode: {e}", tmp.display()))?;
+            let content_len = resp.content_length();
+            let total = content_len.map(|cl| cl + existing_bytes);
+            (file, existing_bytes, total)
+        } else if status.is_success() {
+            // Either fresh download or server didn't support Range (e.g. status 200 OK returned full body)
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(|e| format!("Failed to create {}: {e}", tmp.display()))?;
+            let total = resp.content_length();
+            (file, 0u64, total)
+        } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // Existing partial file might already be equal to or larger than server size.
+            // Check if it verifies as valid.
+            if verify_download(&tmp, file_name).is_ok() {
+                std::fs::rename(&tmp, &dest)
+                    .map_err(|e| format!("Failed to move {file_name} into place: {e}"))?;
+                eprintln!("Downloaded {file_name} (from existing partial file)");
+                continue;
+            } else {
+                // Remove invalid partial file and retry clean
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!(
+                    "Range not satisfiable for {file_name}; cleared partial file, retry download"
+                ));
             }
-            file.write_all(&buf[..n])
-                .map_err(|e| format!("Failed to write {}: {e}", tmp.display()))?;
-            written += n as u64;
-            // Throttle progress events so multi-GB downloads don't flood the
-            // event loop: at most one per 8 MiB plus a final report.
-            if let Some(p) = on_progress {
-                if written.saturating_sub(last_report) >= 8 * 1024 * 1024 {
-                    last_report = written;
-                    p(file_name, written, total);
+        } else {
+            return Err(format!("Failed to download {file_name}: HTTP {status}"));
+        };
+
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut last_report: u64 = written;
+        let mut stream_err: Option<String> = None;
+        loop {
+            match resp.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Err(e) = file.write_all(&buf[..n]) {
+                        stream_err = Some(format!("Failed to write {}: {e}", tmp.display()));
+                        break;
+                    }
+                    written += n as u64;
+                    // Throttle progress events so multi-GB downloads don't flood the
+                    // event loop: at most one per 8 MiB plus a final report.
+                    if let Some(p) = on_progress {
+                        if written.saturating_sub(last_report) >= 8 * 1024 * 1024 {
+                            last_report = written;
+                            p(file_name, written, total);
+                        }
+                    }
+                }
+                Err(e) => {
+                    stream_err = Some(format!("Download interrupted for {file_name}: {e}"));
+                    break;
                 }
             }
         }
@@ -273,7 +324,26 @@ pub fn download_model_sync(
             p(file_name, written, total);
         }
 
-        verify_download(&tmp, file_name)?;
+        if let Some(err) = stream_err {
+            // Flush file to disk so downloaded bytes are preserved for resume
+            let _ = file.flush();
+            return Err(err);
+        }
+
+        // Verify download against pinned SHA-256 only when stream completed
+        if let Err(e) = verify_download(&tmp, file_name) {
+            // Check if file is incomplete (total known and written < total)
+            if let Some(tot) = total {
+                if written < tot {
+                    return Err(format!(
+                        "Download incomplete for {file_name} ({written}/{tot} bytes). Resume on next attempt."
+                    ));
+                }
+            }
+            // Truly corrupted full file: delete so it starts clean
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
 
         std::fs::rename(&tmp, &dest)
             .map_err(|e| format!("Failed to move {file_name} into place: {e}"))?;

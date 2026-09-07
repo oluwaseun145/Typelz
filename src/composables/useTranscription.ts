@@ -18,7 +18,10 @@ import type {
  * is controlled by the existing microphone composable.
  */
 export function useTranscription() {
-  const isTranscribing = ref(false)
+  /** True only while `transcribe_start` is in-flight (model downloading / loading). */
+  const isModelLoading = ref(false)
+  /** True once the backend engine is loaded and ready to transcribe. */
+  const isModelReady = ref(false)
   const lastTranscript = ref('')
   const modelStatus = ref<ModelStatus | null>(null)
   const downloadProgress = ref<DownloadProgress | null>(null)
@@ -43,26 +46,33 @@ export function useTranscription() {
 
   /** Start transcription mode: downloads/loads the model if needed. */
   async function startTranscription(): Promise<void> {
-    if (isTranscribing.value) return
+    if (isModelLoading.value) return
     error.value = null
-    isTranscribing.value = true
+    isModelLoading.value = true
+    // New session: clear the previous session's result so it cannot be
+    // mistaken for the upcoming recording's transcript.
+    lastTranscript.value = ''
     try {
       await invoke('transcribe_start')
+      // Engine is now loaded; loading phase is over.
+      isModelReady.value = true
     } catch (err) {
-      isTranscribing.value = false
       error.value = toError(err, 'Failed to start transcription')
+    } finally {
+      // Always clear the loading flag whether the invoke succeeded or failed.
+      isModelLoading.value = false
     }
   }
 
   /** Stop capture (final flush) and record the latest transcript. */
   async function stopTranscription(): Promise<void> {
-    if (!isTranscribing.value) return
+    if (!isModelReady.value) return
     try {
       lastTranscript.value = await invoke<string>('transcribe_stop')
     } catch (err) {
       error.value = toError(err, 'Failed to stop transcription')
     } finally {
-      isTranscribing.value = false
+      isModelReady.value = false
     }
   }
 
@@ -93,6 +103,10 @@ export function useTranscription() {
         }
       } else if (payload.status === 'ready') {
         downloadProgress.value = null
+        // Engine confirmed ready by backend event — clear any residual loading
+        // state and sync the frontend model status cache.
+        isModelLoading.value = false
+        isModelReady.value = true
         refreshModelStatus().catch(() => {})
       }
       callback?.(payload)
@@ -118,7 +132,8 @@ export function useTranscription() {
   })
 
   return {
-    isTranscribing,
+    isModelLoading,
+    isModelReady,
     lastTranscript,
     modelStatus,
     downloadProgress,

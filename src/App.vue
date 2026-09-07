@@ -17,7 +17,8 @@ const {
 } = useMicrophone()
 
 const {
-  isTranscribing,
+  isModelLoading,
+  isModelReady,
   lastTranscript,
   modelStatus,
   downloadProgress,
@@ -42,8 +43,7 @@ onResult()
 onModelStatus()
 onError(() => {})
 
-const isModelReady = computed(() => modelStatus.value !== null && 'Ready' in modelStatus.value)
-const isModelDownloading = computed(() => isTranscribing.value && downloadProgress.value !== null)
+const isModelDownloading = computed(() => isModelLoading.value && downloadProgress.value !== null)
 
 function modelStatusText(status: ModelStatus | null): string {
   if (!status) return 'Unknown'
@@ -139,14 +139,14 @@ loadDevices().catch(() => {})
       <div class="controls">
         <button
           class="btn btn-primary"
-          :disabled="isTranscribing"
+          :disabled="isModelLoading || isModelReady"
           @click="startTranscription"
         >
-          {{ isTranscribing ? 'Preparing model...' : 'Start Transcription' }}
+          {{ isModelLoading ? 'Loading model...' : isModelReady ? 'Model ready' : 'Start Transcription' }}
         </button>
         <button
           class="btn btn-secondary"
-          :disabled="!isTranscribing"
+          :disabled="!isModelReady"
           @click="stopTranscription"
         >
           Stop
@@ -154,8 +154,8 @@ loadDevices().catch(() => {})
       </div>
 
       <p class="hint">
-        After pressing Start Transcription, use the microphone controls above to
-        record, then press Stop to get the transcript.
+        Press Start Transcription to load the model, then use the microphone
+        controls above to record. Press Stop when done to get the transcript.
       </p>
 
       <div v-if="transcriptionError" class="error-display">

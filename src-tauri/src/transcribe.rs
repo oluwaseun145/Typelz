@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use ort::session::{Session, SessionInputs};
 use ort::value::Tensor;
+const NEMO128_ONNX: &[u8] = include_bytes!("../models/nemo128.onnx");
 
 pub fn load_vocab(path: &Path) -> Result<Vec<String>, String> {
     let content = std::fs::read_to_string(path)
@@ -10,6 +11,41 @@ pub fn load_vocab(path: &Path) -> Result<Vec<String>, String> {
     Ok(content.lines().map(|l| l.to_string()).collect())
 }
 
+/// Formats decoded token text into human-readable sentences with capitalization
+/// and trailing punctuation.
+fn format_transcript(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut chars: String = trimmed.chars().collect();
+    let first: String = chars.drain(..1).collect::<String>().to_uppercase();
+    let mut result = format!("{}{}", first, chars);
+
+    if !result.ends_with('.') && !result.ends_with(',') && !result.ends_with('!')
+        && !result.ends_with('?') && !result.ends_with(':') && !result.ends_with(';') {
+        result.push('.');
+    }
+
+    result
+}
+
+/// Joins a new utterance transcript onto the accumulated session transcript.
+/// Whitespace is trimmed and segments are separated by a single space; any
+/// empty input yields the other side (or empty when both are empty).
+fn join_transcript(existing: &str, new: &str) -> String {
+    let e = existing.trim();
+    let n = new.trim();
+    match (e.is_empty(), n.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => n.to_string(),
+        (false, true) => e.to_string(),
+        (false, false) => format!("{e} {n}"),
+    }
+}
+
+#[allow(dead_code)]
 /// Decode CTC-style token sequence to text, removing blanks and repetitions.
 fn ctc_decode(tokens: &[usize], vocab: &[String]) -> String {
     const BLANK_TOKEN: usize = 0;
@@ -32,19 +68,10 @@ fn ctc_decode(tokens: &[usize], vocab: &[String]) -> String {
         prev_token = token;
     }
 
-    let mut chars: String = result.chars().collect();
-    if !chars.is_empty() {
-        let first: String = chars.drain(..1).collect::<String>().to_uppercase();
-        result = format!("{}{}", first, chars);
-    }
-    if !result.ends_with('.') && !result.ends_with(',') && !result.ends_with('!')
-        && !result.ends_with('?') && !result.ends_with(':') && !result.ends_with(';') {
-        result.push('.');
-    }
-
-    result
+    format_transcript(&result)
 }
 
+#[allow(dead_code)]
 /// Narrow beam search over per-frame token scores.
 ///
 /// Each frame contributes one token to the output sequence and each beam
@@ -134,43 +161,83 @@ impl std::error::Error for TranscribeError {}
 /// loop (fbank features, hidden states, duration-based token emission), which
 /// is a follow-up spec item — see the contract note in `run_inference`.
 pub struct TranscriptionEngine {
+    preprocessor: Arc<Mutex<Session>>,
     encoder: Arc<Mutex<Session>>,
+    decoder_joint: Arc<Mutex<Session>>,
     vocab: Vec<String>,
-    hidden_dim: usize,
-    last_transcript: Mutex<String>,
+    blank_idx: usize,
+    /// All utterances of the current session, joined. Reset when a new
+    /// session starts; delivered whole when the recording stops.
+    session_transcript: Mutex<String>,
 }
 
 impl TranscriptionEngine {
     /// Creates a new transcription engine by loading the ONNX models.
     pub fn new(model_dir: &Path) -> Result<Self, TranscribeError> {
         let encoder_path = model_dir.join("encoder-model.int8.onnx");
+        let decoder_path = model_dir.join("decoder_joint-model.int8.onnx");
         let vocab_path = model_dir.join("vocab.txt");
 
-        let vocab = load_vocab(&vocab_path).map_err(|e| TranscribeError::ModelLoad(e))?;
+        let raw_vocab = load_vocab(&vocab_path).map_err(TranscribeError::ModelLoad)?;
 
-        let mut builder = Session::builder().map_err(|e| {
-            TranscribeError::ModelLoad(format!("Failed to create session builder: {e}"))
+        let mut vocab: Vec<String> = Vec::new();
+        let mut blank_idx = 8192;
+        for (i, line) in raw_vocab.iter().enumerate() {
+            let last_space = line.rfind(' ').unwrap_or(line.len());
+            let tok = &line[..last_space];
+            let idx = line[last_space..].trim().parse::<usize>().unwrap_or(i);
+            if tok == "<blk>" {
+                blank_idx = idx;
+            }
+            if idx >= vocab.len() {
+                vocab.resize(idx + 1, String::new());
+            }
+            vocab[idx] = tok.to_string();
+        }
+
+        let mut preproc_builder = Session::builder().map_err(|e| {
+            TranscribeError::ModelLoad(format!("Failed to create preprocessor session builder: {e}"))
         })?;
-        let encoder_session = builder.commit_from_file(encoder_path).map_err(|e| {
+        let preprocessor_session = preproc_builder.commit_from_memory(NEMO128_ONNX).map_err(|e| {
+            TranscribeError::ModelLoad(format!("Failed to load preprocessor: {e}"))
+        })?;
+
+        let mut enc_builder = Session::builder().map_err(|e| {
+            TranscribeError::ModelLoad(format!("Failed to create encoder session builder: {e}"))
+        })?;
+        let encoder_session = enc_builder.commit_from_file(encoder_path).map_err(|e| {
             TranscribeError::ModelLoad(format!("Failed to load encoder: {e}"))
         })?;
 
-        // Validate encoder output shape and extract hidden dimension.
-        // The encoder outputs logits with shape [batch, time_steps, hidden_dim].
-        const EXPECTED_HIDDEN_DIM: usize = 1024;
-        let hidden_dim = EXPECTED_HIDDEN_DIM; // validated at runtime in run_inference
+        let mut dec_builder = Session::builder().map_err(|e| {
+            TranscribeError::ModelLoad(format!("Failed to create decoder session builder: {e}"))
+        })?;
+        let decoder_session = dec_builder.commit_from_file(decoder_path).map_err(|e| {
+            TranscribeError::ModelLoad(format!("Failed to load decoder_joint: {e}"))
+        })?;
 
         Ok(Self {
+            preprocessor: Arc::new(Mutex::new(preprocessor_session)),
             encoder: Arc::new(Mutex::new(encoder_session)),
+            decoder_joint: Arc::new(Mutex::new(decoder_session)),
             vocab,
-            hidden_dim,
-            last_transcript: Mutex::new(String::new()),
+            blank_idx,
+            session_transcript: Mutex::new(String::new()),
         })
     }
 
-    /// Returns the last transcript.
-    pub fn last_transcript(&self) -> Option<String> {
-        self.last_transcript.lock().ok().map(|s| s.clone())
+    /// Clears the accumulated session transcript. Called at the start of a new
+    /// transcription session so a previous session's result is not surfaced
+    /// as the new one.
+    pub fn clear_transcript(&self) {
+        if let Ok(mut session) = self.session_transcript.lock() {
+            session.clear();
+        }
+    }
+
+    /// Returns the transcript accumulated over the current session.
+    pub fn session_transcript(&self) -> String {
+        self.session_transcript.lock().ok().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Transcribes a 16 kHz mono i16 little-endian PCM utterance to text.
@@ -184,90 +251,287 @@ impl TranscriptionEngine {
             return Err(TranscribeError::AudioProcessing("Empty audio".to_string()));
         }
 
+        let started = std::time::Instant::now();
         let text = self.run_inference(&samples)?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[typelz] inference: {} samples (~{:.1}s) -> {} chars in {:.0} ms",
+            samples.len(),
+            samples.len() as f64 / 16000.0,
+            text.len(),
+            elapsed_ms,
+        );
 
         {
-            let mut last = self.last_transcript.lock().unwrap();
-            *last = text.clone();
+            let mut session = self.session_transcript.lock().unwrap();
+            *session = join_transcript(&session, &text);
         }
 
         Ok(text)
     }
 
-    /// Runs the full inference pipeline: encoder → beam search → CTC decode.
-    ///
-    /// NOTE (F-17): the verified ONNX contract for this model pair (repo
-    /// `istupakov/parakeet-tdt-0.6b-v3-onnx`; reference implementation
-    /// `onnx-asr`, `models/nemo.py`, `NemoConformerTdt`) is:
-    ///   - encoder inputs: `audio_signal` [1, 80, T] f32 (10 ms log-mel fbank,
-    ///     100 frames/s at 16 kHz) + `length` [1] i64
-    ///   - encoder outputs: `outputs` [1, H, T'] f32 + `encoded_lengths` [1] i64
-    ///   - decoder_joint inputs: `encoder_outputs`, `targets`, `target_length`,
-    ///     `input_states_1`, `input_states_2`
-    ///   - TDT decoding: iterative — the joint output is
-    ///     [vocab logits | duration scores] and each emitted token consumes
-    ///     the predicted number of frames.
-    /// The code below is a placeholder: it feeds raw 16 kHz PCM as a single
-    /// `input` tensor and treats encoder output rows as token scores. It runs
-    /// end-to-end but will not produce correct transcripts against the real
-    /// models until a follow-up spec wires fbank features and the TDT
-    /// transducer loop (including the decoder_joint session).
+    /// Runs the full inference pipeline:
+    /// 1. Preprocessor: 16 kHz PCM waveform -> 128 log-mel filterbank features [1, 128, T_feat]
+    /// 2. Encoder: features + length -> acoustic embeddings [1, 1024, T_enc]
+    /// 3. Decoder joint: TDT decoding loop emitting tokens and advancing time frames
     fn run_inference(&self, samples: &[f32]) -> Result<String, TranscribeError> {
-        const BEAM_WIDTH: usize = 5;
-        // Drop candidate beams more than this log-score behind the best one.
-        const BEAM_THRESHOLD: f32 = 10.0;
+        let sample_len = samples.len() as i64;
+        let waveforms = Tensor::from_array(([1i64, sample_len], samples.to_vec().into_boxed_slice()))
+            .map_err(|e| TranscribeError::Inference(format!("Failed to create waveforms tensor: {e}")))?;
+        let waveforms_lens = Tensor::from_array(([1i64], vec![sample_len].into_boxed_slice()))
+            .map_err(|e| TranscribeError::Inference(format!("Failed to create waveforms_lens tensor: {e}")))?;
 
-        let tensor = Tensor::from_array((vec![samples.len() as i64], samples.to_vec()))
-            .map_err(|e| TranscribeError::Inference(format!("Failed to create input tensor: {e}")))?;
-        let mut inputs: std::collections::HashMap<String, ort::value::DynTensor> = std::collections::HashMap::new();
-        inputs.insert("input".to_string(), tensor.upcast());
+        let (features, features_lens) = {
+            let mut preproc_inputs = std::collections::HashMap::new();
+            preproc_inputs.insert("waveforms".to_string(), waveforms.upcast());
+            preproc_inputs.insert("waveforms_lens".to_string(), waveforms_lens.upcast());
 
-        let data: Vec<f32> = {
-            let mut enc = self.encoder.lock().unwrap();
-            let outputs = enc.run(SessionInputs::from(inputs))
-                .map_err(|e| TranscribeError::Inference(format!("Encoder inference failed: {e}")))?;
+            let mut preproc = self.preprocessor.lock().unwrap();
+            let outputs = preproc.run(SessionInputs::from(preproc_inputs))
+                .map_err(|e| TranscribeError::Inference(format!("Preprocessor inference failed: {e}")))?;
 
-            let value_ref = outputs.values().next()
-                .ok_or_else(|| TranscribeError::Inference("No encoder output".to_string()))?;
+            let feat = outputs.get("features")
+                .ok_or_else(|| TranscribeError::Inference("Missing features output".to_string()))?;
+            let feat_len = outputs.get("features_lens")
+                .ok_or_else(|| TranscribeError::Inference("Missing features_lens output".to_string()))?;
 
-            let array = value_ref.try_extract_array::<f32>()
-                .map_err(|_| TranscribeError::Inference("Failed to extract tensor data".to_string()))?;
+            let (feat_shape, feat_data) = feat.try_extract_tensor::<f32>()
+                .map_err(|e| TranscribeError::Inference(format!("Failed to extract features: {e}")))?;
+            let feat_shape_vec: Vec<i64> = feat_shape.iter().copied().collect();
+            let feat_tensor = Tensor::from_array((feat_shape_vec, feat_data.to_vec().into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to clone features tensor: {e}")))?;
 
-            array.as_slice()
-                .map(|s| s.to_vec())
-                .ok_or_else(|| TranscribeError::Inference("Tensor not contiguous".to_string()))?
+            let (len_shape, len_data) = feat_len.try_extract_tensor::<i64>()
+                .map_err(|e| TranscribeError::Inference(format!("Failed to extract features_lens: {e}")))?;
+            let len_shape_vec: Vec<i64> = len_shape.iter().copied().collect();
+            let len_tensor = Tensor::from_array((len_shape_vec, len_data.to_vec().into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to clone features_lens tensor: {e}")))?;
+
+            (feat_tensor, len_tensor)
         };
 
-        let hidden_dim = self.hidden_dim;
-        if data.len() % hidden_dim != 0 {
-            return Err(TranscribeError::ShapeMismatch {
-                expected: hidden_dim,
-                actual: data.len() % hidden_dim,
-            });
+        let (enc_data, enc_len, time_steps) = {
+            let mut enc_inputs = std::collections::HashMap::new();
+            enc_inputs.insert("audio_signal".to_string(), features.upcast());
+            enc_inputs.insert("length".to_string(), features_lens.upcast());
+
+            let mut enc = self.encoder.lock().unwrap();
+            let outputs = enc.run(SessionInputs::from(enc_inputs))
+                .map_err(|e| TranscribeError::Inference(format!("Encoder inference failed: {e}")))?;
+
+            let out = outputs.get("outputs")
+                .ok_or_else(|| TranscribeError::Inference("Missing encoder outputs".to_string()))?;
+            let out_lens = outputs.get("encoded_lengths")
+                .ok_or_else(|| TranscribeError::Inference("Missing encoder encoded_lengths".to_string()))?;
+
+            let (out_shape, out_slice) = out.try_extract_tensor::<f32>()
+                .map_err(|e| TranscribeError::Inference(format!("Failed to extract encoder outputs: {e}")))?;
+            if out_shape.len() < 3 || out_shape[1] != 1024 {
+                return Err(TranscribeError::ShapeMismatch {
+                    expected: 1024,
+                    actual: if out_shape.len() >= 2 { out_shape[1] as usize } else { 0 },
+                });
+            }
+            let time_steps = out_shape[2] as usize;
+
+            let (_, len_slice) = out_lens.try_extract_tensor::<i64>()
+                .map_err(|e| TranscribeError::Inference(format!("Failed to extract encoder lengths: {e}")))?;
+            let enc_len = if !len_slice.is_empty() { len_slice[0] as usize } else { 0 };
+
+            (out_slice.to_vec(), enc_len, time_steps)
+        };
+
+        // TDT greedy transducer loop
+        let vocab_size = self.vocab.len();
+        let blank_idx = self.blank_idx;
+        let mut state1_vec = vec![0.0f32; 2 * 1 * 640];
+        let mut state2_vec = vec![0.0f32; 2 * 1 * 640];
+        let mut tokens: Vec<usize> = Vec::new();
+        let mut t = 0;
+        let mut emitted_tokens = 0;
+        const MAX_TOKENS_PER_STEP: usize = 10;
+
+        let mut dec = self.decoder_joint.lock().unwrap();
+
+        while t < enc_len && t < time_steps {
+            let mut enc_frame = Vec::with_capacity(1024);
+            for c in 0..1024 {
+                enc_frame.push(enc_data[c * time_steps + t]);
+            }
+
+            let last_token = *tokens.last().unwrap_or(&blank_idx) as i32;
+
+            let enc_out_tensor = Tensor::from_array(([1i64, 1024i64, 1i64], enc_frame.into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to build frame tensor: {e}")))?;
+            let targets = Tensor::from_array(([1i64, 1i64], vec![last_token].into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to build targets tensor: {e}")))?;
+            let target_length = Tensor::from_array(([1i64], vec![1i32].into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to build target_length tensor: {e}")))?;
+            let state1 = Tensor::from_array(([2i64, 1i64, 640i64], state1_vec.clone().into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to build state1 tensor: {e}")))?;
+            let state2 = Tensor::from_array(([2i64, 1i64, 640i64], state2_vec.clone().into_boxed_slice()))
+                .map_err(|e| TranscribeError::Inference(format!("Failed to build state2 tensor: {e}")))?;
+
+            let mut dec_inputs = std::collections::HashMap::new();
+            dec_inputs.insert("encoder_outputs".to_string(), enc_out_tensor.upcast());
+            dec_inputs.insert("targets".to_string(), targets.upcast());
+            dec_inputs.insert("target_length".to_string(), target_length.upcast());
+            dec_inputs.insert("input_states_1".to_string(), state1.upcast());
+            dec_inputs.insert("input_states_2".to_string(), state2.upcast());
+
+            let dec_outputs = dec.run(SessionInputs::from(dec_inputs))
+                .map_err(|e| TranscribeError::Inference(format!("Decoder inference failed: {e}")))?;
+
+            let out_logits = dec_outputs.get("outputs")
+                .ok_or_else(|| TranscribeError::Inference("Missing decoder outputs".to_string()))?;
+            let out_state1 = dec_outputs.get("output_states_1")
+                .ok_or_else(|| TranscribeError::Inference("Missing decoder output_states_1".to_string()))?;
+            let out_state2 = dec_outputs.get("output_states_2")
+                .ok_or_else(|| TranscribeError::Inference("Missing decoder output_states_2".to_string()))?;
+
+            let (_, logits_data) = out_logits.try_extract_tensor::<f32>()
+                .map_err(|e| TranscribeError::Inference(format!("Failed to extract logits: {e}")))?;
+
+            let token_logits = if logits_data.len() >= vocab_size {
+                &logits_data[..vocab_size]
+            } else {
+                logits_data
+            };
+            let best_token = token_logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(blank_idx);
+
+            let dur_logits = if logits_data.len() > vocab_size {
+                &logits_data[vocab_size..]
+            } else {
+                &[]
+            };
+            let step = dur_logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            if best_token != blank_idx {
+                let (_, s1) = out_state1.try_extract_tensor::<f32>()
+                    .map_err(|e| TranscribeError::Inference(format!("Failed to extract state1: {e}")))?;
+                let (_, s2) = out_state2.try_extract_tensor::<f32>()
+                    .map_err(|e| TranscribeError::Inference(format!("Failed to extract state2: {e}")))?;
+                state1_vec = s1.to_vec();
+                state2_vec = s2.to_vec();
+                tokens.push(best_token);
+                emitted_tokens += 1;
+            }
+
+            if step > 0 {
+                t += step;
+                emitted_tokens = 0;
+            } else if best_token == blank_idx || emitted_tokens == MAX_TOKENS_PER_STEP {
+                t += 1;
+                emitted_tokens = 0;
+            }
         }
 
-        let frames: Vec<&[f32]> = data.chunks(hidden_dim).collect();
-        let best_tokens = beam_search(&frames, self.vocab.len(), BEAM_WIDTH, BEAM_THRESHOLD);
-        let text = ctc_decode(&best_tokens, &self.vocab);
-        Ok(text)
+        let raw: String = tokens
+            .iter()
+            .filter_map(|&tok| self.vocab.get(tok))
+            .filter(|tok_str| !tok_str.starts_with('<'))
+            .map(|tok_str| tok_str.replace('\u{2581}', " "))
+            .collect();
+
+        Ok(format_transcript(&raw))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_decode_formatting() {
+        let text1 = format_transcript("hello world");
+        assert_eq!(text1, "Hello world.");
+
+        let text2 = format_transcript("hello world!");
+        assert_eq!(text2, "Hello world!");
+
+        let text3 = format_transcript("");
+        assert_eq!(text3, "");
+    }
 
     #[test]
-    fn test_ctc_decode_removes_blanks() {
-        let vocab = vec![
-            "<blank>".to_string(),
-            "▁Hello".to_string(),
-            "▁World".to_string(),
-        ];
-        let tokens = vec![0, 1, 1, 0, 2, 0];
-        let result = ctc_decode(&tokens, &vocab);
-        assert!(result.contains("Hello"));
-        assert!(result.contains("World"));
+    fn test_tdt_real_inference() {
+        let cache_dir = std::path::PathBuf::from(r"C:\Users\Oluwafemi\AppData\Local\Typelz\Typelz\cache\models\parukeet-tdt-v3-onnx");
+        if !cache_dir.exists() {
+            return;
+        }
+        let engine = match TranscriptionEngine::new(&cache_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("Skipping test: {}", e);
+                return;
+            }
+        };
+
+        // 1 second of silence
+        let samples = vec![0.0f32; 16000];
+        let pcm: Vec<u8> = samples.iter().flat_map(|&s| {
+            let i = (s * 32768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            i.to_le_bytes().to_vec()
+        }).collect();
+
+        let result = engine.transcribe(&pcm);
+        println!("Transcribe result: {:?}", result);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_join_transcript_both_empty() {
+        assert_eq!(join_transcript("", ""), "");
+        assert_eq!(join_transcript("   ", "  "), "");
+    }
+
+    #[test]
+    fn test_join_transcript_one_empty() {
+        assert_eq!(join_transcript("", "Hello."), "Hello.");
+        assert_eq!(join_transcript("Hello.", ""), "Hello.");
+    }
+
+    #[test]
+    fn test_join_transcript_joins_with_single_space() {
+        assert_eq!(join_transcript("Hello.", "World."), "Hello. World.");
+        assert_eq!(join_transcript("  a  ", "  b  "), "a b");
+    }
+
+    #[test]
+    fn test_session_transcript_clears() {
+        let cache_dir = std::path::PathBuf::from(r"C:\Users\Oluwafemi\AppData\Local\Typelz\Typelz\cache\models\parukeet-tdt-v3-onnx");
+        if !cache_dir.exists() {
+            return;
+        }
+        let engine = match TranscriptionEngine::new(&cache_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("Skipping test: {}", e);
+                return;
+            }
+        };
+
+        // Silence transcribes to empty, so the session accumulates to empty;
+        // this exercises the real engine's session wiring.
+        let samples = vec![0.0f32; 16000];
+        let pcm: Vec<u8> = samples.iter().flat_map(|&s| {
+            let i = (s * 32768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            i.to_le_bytes().to_vec()
+        }).collect();
+
+        assert!(engine.transcribe(&pcm).is_ok());
+        assert_eq!(engine.session_transcript(), "");
+        engine.clear_transcript();
+        assert_eq!(engine.session_transcript(), "");
     }
 
     #[test]
@@ -278,7 +542,7 @@ mod tests {
         ];
         let tokens = vec![0, 0, 0, 0];
         let result = ctc_decode(&tokens, &vocab);
-        assert_eq!(result, ".");
+        assert_eq!(result, "");
     }
 
     #[test]

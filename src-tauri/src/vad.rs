@@ -1,4 +1,4 @@
-use webrtc_vad::Vad;
+use webrtc_vad::{SampleRate, Vad, VadMode};
 
 // Safety: needed to satisfy cpal's `Send + 'static` stream-callback bound,
 // which cannot otherwise be met: `webrtc_vad::Vad` (0.4.0) wraps a raw
@@ -31,9 +31,13 @@ pub struct VadDetector {
 
 impl VadDetector {
     /// Creates a new VAD detector at 16 kHz sample rate.
+    ///
+    /// Uses `LowBitrate` aggressiveness instead of the default `Quality`
+    /// mode: the downmixed mic signal carries ambient noise, and Quality mode
+    /// fires on 0.1-0.3 s blips that the model turns into random fragments.
     pub fn new() -> Self {
         VadDetector {
-            vad: Vad::new_with_rate(webrtc_vad::SampleRate::Rate16kHz),
+            vad: Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::LowBitrate),
             state: VadState::Silent,
             error: None,
         }
