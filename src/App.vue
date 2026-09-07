@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import SettingsWindow from './components/settings/SettingsWindow.vue'
 import { useMicrophone } from './composables/useMicrophone.ts'
+import { useTranscription } from './composables/useTranscription.ts'
+import type { ModelStatus } from './types/tauri.ts'
 
 const {
   devices,
@@ -10,7 +13,20 @@ const {
   loadDevices,
   startCapture,
   stopCapture,
+  onError,
 } = useMicrophone()
+
+const {
+  isTranscribing,
+  lastTranscript,
+  modelStatus,
+  downloadProgress,
+  error: transcriptionError,
+  startTranscription,
+  stopTranscription,
+  onResult,
+  onModelStatus,
+} = useTranscription()
 
 async function handleStart(): Promise<void> {
   await startCapture(selectedDeviceId.value ?? undefined)
@@ -18,6 +34,29 @@ async function handleStart(): Promise<void> {
 
 async function handleStop(): Promise<void> {
   await stopCapture()
+}
+
+// Keep transcript and model progress state current; capture-pipeline errors
+// (including transcription failures) surface in the microphone section.
+onResult()
+onModelStatus()
+onError(() => {})
+
+const isModelReady = computed(() => modelStatus.value !== null && 'Ready' in modelStatus.value)
+const isModelDownloading = computed(() => isTranscribing.value && downloadProgress.value !== null)
+
+function modelStatusText(status: ModelStatus | null): string {
+  if (!status) return 'Unknown'
+  if ('Ready' in status) return 'Model ready'
+  if ('Downloading' in status) {
+    const { downloaded_bytes: d, total_bytes: t } = status.Downloading
+    return t > 0
+      ? `Downloading (${(d / 1048576).toFixed(1)} / ${(t / 1048576).toFixed(1)} MB)`
+      : 'Downloading...'
+  }
+  if ('NotDownloaded' in status) return `Not downloaded (${status.NotDownloaded.missing_files.join(', ')})`
+  if ('Partial' in status) return `Partially downloaded, missing: ${status['Partial'].missing.join(', ')}`
+  return status.Error.message
 }
 
 // Load devices on mount.
@@ -78,6 +117,54 @@ loadDevices().catch(() => {})
           <p class="error-text">{{ error }}</p>
         </div>
       </template>
+    </section>
+
+    <!-- Transcription section -->
+    <section class="transcribe-section">
+      <h2>Transcribe</h2>
+
+      <div class="model-status">
+        <span class="state-indicator" :class="{ ready: isModelReady, downloading: isModelDownloading }">
+          {{ modelStatusText(modelStatus) }}
+        </span>
+      </div>
+
+      <div v-if="isModelDownloading && downloadProgress" class="status">
+        Downloading {{ downloadProgress.file ?? 'model file' }}...
+        {{ downloadProgress.total > 0
+          ? Math.round((downloadProgress.downloaded / downloadProgress.total) * 100) + '%'
+          : '...' }}
+      </div>
+
+      <div class="controls">
+        <button
+          class="btn btn-primary"
+          :disabled="isTranscribing"
+          @click="startTranscription"
+        >
+          {{ isTranscribing ? 'Preparing model...' : 'Start Transcription' }}
+        </button>
+        <button
+          class="btn btn-secondary"
+          :disabled="!isTranscribing"
+          @click="stopTranscription"
+        >
+          Stop
+        </button>
+      </div>
+
+      <p class="hint">
+        After pressing Start Transcription, use the microphone controls above to
+        record, then press Stop to get the transcript.
+      </p>
+
+      <div v-if="transcriptionError" class="error-display">
+        <p class="error-text">{{ transcriptionError }}</p>
+      </div>
+
+      <div class="transcript-output" :class="{ empty: lastTranscript.length === 0 }">
+        {{ lastTranscript || 'No transcript yet.' }}
+      </div>
     </section>
 
     <!-- Settings (from feature 1) -->
@@ -201,5 +288,56 @@ loadDevices().catch(() => {})
   color: var(--text);
   opacity: 0.7;
   font-size: 14px;
+}
+
+.transcribe-section {
+  width: 100%;
+  max-width: 480px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.transcribe-section h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: var(--text-h);
+}
+
+.model-status {
+  margin-bottom: 16px;
+}
+
+.state-indicator.ready {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.state-indicator.downloading {
+  color: var(--text);
+  opacity: 0.8;
+}
+
+.hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.7;
+}
+
+.transcript-output {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  min-height: 64px;
+}
+
+.transcript-output.empty {
+  opacity: 0.6;
 }
 </style>
