@@ -5,6 +5,7 @@ import {
   DEFAULT_DICTATION_SETTINGS,
 } from '../lib/buildCleanupPrompt'
 import { buildFormatMessages, formattingEnabled } from '../lib/buildFormatPrompt'
+import { applyFormatGuardrail } from '../lib/format-guardrail'
 import { evaluateCleanupResult } from '../lib/evaluateCleanupResponse'
 import { evaluateFormatResult } from '../lib/evaluateFormatResult'
 import type { DictationSettings, PipelineState, StageStatus } from '../types/dictation'
@@ -95,8 +96,12 @@ export function useDictationPipeline() {
       } else {
         const result = evaluateFormatResult(response, current)
         if (result.applied) {
-          current = result.text
-          formattingStatus.value = 'applied'
+          // The guardrail reverts any structure the formatter invented on an
+          // input that did not strongly signal a list, so the output never
+          // carries more structure than the speaker's evidence supports.
+          const guarded = applyFormatGuardrail(current, result.text, settings.formatting_rules)
+          current = guarded.text
+          formattingStatus.value = guarded.reverted ? 'reverted' : 'applied'
         } else {
           formattingStatus.value = 'fallback'
         }

@@ -66,6 +66,9 @@ function cleanupStatusLabel(): string {
 
 function formattingStatusLabel(): string {
   if (formattingStatus.value === 'applied') return 'Formatting: applied'
+  if (formattingStatus.value === 'reverted') {
+    return 'Formatting: reverted - invented structure removed, cleaned text kept'
+  }
   if (formattingStatus.value === 'fallback') {
     return 'Formatting: failed - previous stage result carried through'
   }

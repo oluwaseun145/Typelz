@@ -231,10 +231,12 @@ checks do not make the Blueprint unusable.
 - Dev server: `npm run dev` (http://localhost:5173)
 - Build: `npm run build` (vue-tsc typecheck, then Vite production build)
 - Preview production build: `npm run preview`
+- Test: `npm run test` (Vitest, `vitest run`)
+- Rust tests: `cargo test` in `src-tauri`
 
-There is no `lint` or `test` command yet. Testing is opt-in. If this project
-`/tests` or `$tests` to add one and update this section with the real test
-commands.
+There is no `lint` command yet. JS/TS logic tests run through Vitest; pure
+logic in `src/lib/` ships a passing test in the same diff when it changes.
+Rust-side unit tests run with `cargo test` in `src-tauri`.
 
 Browser testing is also opt-in. Run `/browser-tests` or `$browser-tests` to add
 or normalize a browser harness and document its exact command as `Browser

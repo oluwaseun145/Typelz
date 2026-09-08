@@ -57,7 +57,7 @@ export interface FormatStageResult {
  * enable flag is false; `skipped` = formatting's per-structure flags are all
  * false; `fallback` = ran and failed, input carried through.
  */
-export type StageStatus = 'off' | 'skipped' | 'applied' | 'fallback'
+export type StageStatus = 'off' | 'skipped' | 'applied' | 'fallback' | 'reverted'
 
 /** Outcome of a cleanup attempt. `text` is always the final text to use. */
 export interface CleanupResult {

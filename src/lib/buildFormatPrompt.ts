@@ -18,19 +18,20 @@ const ALWAYS_ON_CLAUSES: string[] = [
   'Return only the formatted text: no preamble, no closing remarks, no quotes around it, no code fences, no explanations.',
   'Do not change, add, remove, or correct any words. Structure only.',
   'Convert only the structures the speaker actually expressed. Never invent structure or content.',
+  'Default to preserving the input structure. Only add structure on strong speaker evidence; when in doubt, keep prose.',
 ]
 
 const STRUCTURE_CLAUSES = {
   paragraphs_enabled:
-    'Insert paragraph breaks where the speaker shifts topic or starts a new thought group.',
+    'Insert a paragraph break only where the speaker clearly shifts subject or thought. Never split into one-sentence paragraphs.',
   bullet_lists_enabled:
-    'Convert an unordered enumeration of items the speaker listed without implied order into a Markdown bullet list (- item).',
+    'Convert to a Markdown bullet list (- item) only with strong evidence the speaker listed items: an explicit count (\"I need to do three things: ...\"), \"the following\", a bare item list that is the whole utterance (\"I need milk, bread, and eggs.\"), or clear repeated item structure with nothing else. Never convert ordinary prose that merely contains items: \"I went to the store and bought milk, bread, and eggs.\" stays a sentence.',
   numbered_lists_enabled:
-    'Convert an enumeration where order was expressed (first, second, next, finally, steps) into a Markdown numbered list (1. item).',
+    'Convert to a Markdown numbered list (1. item) only when order was expressed: first/second/third, number one/number two, clearly ordered steps.',
   headings_enabled:
-    'Where the speaker clearly named a section or topic governing the following content, place one # or ## heading above it. Use headings sparingly.',
+    'Use a heading only where the speaker explicitly named a section that governs following content. This is rare in speech; default to no headings.',
   checklists_enabled:
-    'Convert enumerated tasks to do (to do, need to, must, plan to) into a Markdown checklist (- [ ] item).',
+    'Convert to a Markdown checklist (- [ ] item) only when the speaker presented an explicit task list: \"Things I need to do: send the report, call John, deploy the app.\" A single imperative sentence inside prose (\"Send the report to John and tell me...\") is not a checklist.',
 } as const
 
 const DISABLED_STRUCTURE_NAMES: Record<keyof FormattingRules, string> = {

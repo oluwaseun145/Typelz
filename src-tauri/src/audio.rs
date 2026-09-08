@@ -144,19 +144,65 @@ fn f32_to_i16_le(samples: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Averages interleaved multi-channel f32 samples down to mono.
+/// Downmixes an interleaved multi-channel stream to mono by selecting the
+/// loudest channel, instead of averaging all of them.
 ///
 /// cpal delivers frames interleaved per channel (L, R, C, S, L, R, ...).
 /// Treating that stream as mono time-stretches and scrambles the audio, so
-/// multi-channel devices must be downmixed before VAD or inference.
-fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return interleaved.to_vec();
+/// multi-channel devices must be downmixed before VAD or inference. A device
+/// such as the 4-channel Realtek mic carries the microphone in only one
+/// channel; averaging all four attenuates the signal by ~12 dB, so the VAD
+/// and model hear mostly noise. Picking the loudest channel keeps the real
+/// signal at full amplitude. The selection is sticky (EMA of per-channel
+/// energy plus a hysteresis gap) so it does not flip-flop between channels
+/// on small fluctuations.
+struct DominantChannelDownmix {
+    /// Per-channel running energy estimate (EMA of mean-square amplitude).
+    energy: Vec<f32>,
+    /// Index of the currently selected (loudest) channel.
+    selected: usize,
+}
+
+impl DominantChannelDownmix {
+    fn new(channels: usize) -> Self {
+        Self {
+            energy: vec![0.0; channels],
+            selected: 0,
+        }
     }
-    interleaved
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
+
+    fn downmix(&mut self, interleaved: &[f32], channels: usize) -> Vec<f32> {
+        if channels <= 1 {
+            return interleaved.to_vec();
+        }
+        // Update the per-channel energy EMA from this buffer.
+        let mut mean_sq = vec![0.0f32; channels];
+        let mut count = vec![0usize; channels];
+        for frame in interleaved.chunks_exact(channels) {
+            for (ch, &sample) in frame.iter().enumerate() {
+                mean_sq[ch] += sample * sample;
+                count[ch] += 1;
+            }
+        }
+        for ch in 0..channels {
+            let rms_sq = if count[ch] > 0 {
+                mean_sq[ch] / count[ch] as f32
+            } else {
+                0.0
+            };
+            self.energy[ch] = self.energy[ch] * 0.8 + rms_sq * 0.2;
+        }
+        // Switch only when another channel is clearly louder (hysteresis).
+        for ch in 0..channels {
+            if ch != self.selected && self.energy[ch] > self.energy[self.selected] * 2.0 {
+                self.selected = ch;
+            }
+        }
+        interleaved
+            .chunks_exact(channels)
+            .filter_map(|frame| frame.get(self.selected).copied())
+            .collect()
+    }
 }
 
 /// Atomically detaches everything queued since the last drain.
@@ -165,6 +211,44 @@ fn drain(queue: &Mutex<VecDeque<Vec<u8>>>) -> VecDeque<Vec<u8>> {
     let mut empty = VecDeque::new();
     std::mem::swap(&mut *q, &mut empty);
     empty
+}
+
+/// Drains the frame and utterance queues on the capture thread until the
+/// one-shot stop message is latched and the queues are empty.
+///
+/// The stop message is a single mpsc value. It is latched on first delivery so
+/// a utterance drained in the same iteration that consumes it cannot swallow
+/// the request: without the latch the next `try_recv` sees an empty channel
+/// and the loop captures audio forever.
+fn run_forwarding_loop(
+    stop_rx: mpsc::Receiver<()>,
+    frame_queue: &Mutex<VecDeque<Vec<u8>>>,
+    utterance_queue: &Mutex<VecDeque<Vec<u8>>>,
+    mut process_frames: impl FnMut(Vec<u8>),
+    mut process_utterances: impl FnMut(&[u8]),
+) {
+    let mut stop_latched = false;
+    loop {
+        let frames = drain(frame_queue);
+        let utterances = drain(utterance_queue);
+
+        for bytes in frames {
+            process_frames(bytes);
+        }
+        for pcm in &utterances {
+            process_utterances(pcm);
+        }
+
+        if !stop_latched && stop_rx.try_recv().is_ok() {
+            stop_latched = true;
+        }
+        if stop_latched && utterances.is_empty() {
+            break;
+        }
+        if !stop_latched {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 
 /// Minimum utterance length, in 16 kHz mono samples, before inference.
@@ -262,6 +346,9 @@ pub fn start_capture(
     // Tracks the current speech run so the trace prints transitions only,
     // not every callback frame.
     let in_speech = Cell::new(false);
+    // Picks the loudest channel of a multi-channel device instead of
+    // averaging all of them (which would attenuate a single-channel mic).
+    let mut downmix = DominantChannelDownmix::new(native_channels as usize);
 
     let handle = std::thread::spawn(move || {
         use cpal::traits::DeviceTrait;
@@ -290,11 +377,13 @@ pub fn start_capture(
                 };
                 // Multi-channel devices deliver interleaved frames; the
                 // pipeline is mono-only, so downmix instead of feeding
-                // scrambled channel data into the VAD and model.
+                // scrambled channel data into the VAD and model. Pick the
+                // loudest channel so a single-channel mic is not attenuated
+                // by averaging in the silent channels.
                 let f32_samples = if native_channels == 1 {
                     raw_samples
                 } else {
-                    downmix_to_mono(&raw_samples, native_channels as usize)
+                    downmix.downmix(&raw_samples, native_channels as usize)
                 };
 
                 let bytes: Vec<u8> = f32_samples.iter()
@@ -400,27 +489,17 @@ pub fn start_capture(
             if native_channels == 1 { "device-mono" } else { "downmixed-mono" },
         );
 
-        loop {
-            let frames = drain(&frame_queue);
-            let utterances = drain(&utterance_queue);
-
-            for bytes in frames {
+        run_forwarding_loop(
+            stop_rx,
+            &frame_queue,
+            &utterance_queue,
+            |bytes| {
                 let _ = app_for_loop.emit("audio-frame", AudioFrame {
                     data: STANDARD.encode(&bytes),
                 });
-            }
-            for pcm in &utterances {
-                handle_utterance(&app_for_loop, &engine, &pcm);
-            }
-
-            let stop_requested = stop_rx.try_recv().is_ok();
-            if stop_requested && utterances.is_empty() {
-                break;
-            }
-            if !stop_requested {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
+            },
+            |pcm| handle_utterance(&app_for_loop, &engine, pcm),
+        );
         // A trailing callback can land between the final drain and the stream
         // drop; process it so stopping returns the last transcript too.
         for pcm in drain(&utterance_queue) {
@@ -510,29 +589,112 @@ mod tests {
     }
 
     #[test]
-    fn test_downmix_to_mono_two_channels() {
-        // Interleaved L,R frames: (1,-1) averages to 0, (0.5,0.5) to 0.5.
-        let out = downmix_to_mono(&[1.0, -1.0, 0.5, 0.5], 2);
-        assert_eq!(out, vec![0.0, 0.5]);
-    }
-
-    #[test]
-    fn test_downmix_to_mono_four_channels() {
-        // The 4-channel case this machine's Realtek mic hits.
-        let out = downmix_to_mono(&[1.0, 1.0, 1.0, 1.0, -0.5, -0.5, -0.5, -0.5], 4);
-        assert_eq!(out, vec![1.0, -0.5]);
-    }
-
-    #[test]
-    fn test_downmix_to_mono_passthrough_single_channel() {
+    fn test_dominant_channel_passthrough_single_channel() {
+        let mut d = DominantChannelDownmix::new(1);
         let input = vec![0.25, -0.75, 1.0];
-        assert_eq!(downmix_to_mono(&input, 1), input);
+        assert_eq!(d.downmix(&input, 1), input);
     }
 
     #[test]
-    fn test_downmix_to_mono_drops_trailing_partial_frame() {
+    fn test_dominant_channel_picks_loudest_channel() {
+        // Channel 1 is much louder than channel 0, so it is selected and its
+        // samples are passed through at full amplitude (not averaged down).
+        let mut d = DominantChannelDownmix::new(2);
+        let input: Vec<f32> = (0..8)
+            .map(|i| if i % 2 == 0 { 0.01 } else { 0.9 })
+            .collect();
+        let out = d.downmix(&input, 2);
+        assert_eq!(out, vec![0.9, 0.9, 0.9, 0.9]);
+    }
+
+    #[test]
+    fn test_dominant_channel_four_channels_picks_loudest() {
+        // The 4-channel case this machine's Realtek mic hits: only channel 2
+        // carries the signal, so it is selected at full amplitude.
+        let mut d = DominantChannelDownmix::new(4);
+        let input: Vec<f32> = vec![0.0, 0.0, 0.8, 0.0, 0.0, 0.0, -0.8, 0.0];
+        let out = d.downmix(&input, 4);
+        assert_eq!(out, vec![0.8, -0.8]);
+    }
+
+    #[test]
+    fn test_dominant_channel_drops_trailing_partial_frame() {
         // A trailing value that does not complete a channel frame is dropped.
-        let out = downmix_to_mono(&[1.0, 1.0, 0.5], 2);
+        let mut d = DominantChannelDownmix::new(2);
+        let out = d.downmix(&[1.0, 1.0, 0.5], 2);
         assert_eq!(out, vec![1.0]);
+    }
+
+    #[test]
+    fn test_dominant_channel_hysteresis_stays_put() {
+        // Once a channel is selected, a small fluctuation on another channel
+        // must not flip the selection (hysteresis gap of 2x).
+        let mut d = DominantChannelDownmix::new(2);
+        // First buffer: channel 0 is clearly louder → selected.
+        let first: Vec<f32> = (0..20).map(|i| if i % 2 == 0 { 1.0 } else { 0.1 }).collect();
+        let _ = d.downmix(&first, 2);
+        assert_eq!(d.selected, 0);
+        // Second buffer: channel 1 is slightly louder but not 2x → stays on 0.
+        let second: Vec<f32> = (0..20).map(|i| if i % 2 == 0 { 1.0 } else { 1.5 }).collect();
+        let out = d.downmix(&second, 2);
+        assert_eq!(d.selected, 0);
+        assert_eq!(out, vec![1.0; 10]);
+    }
+
+    #[test]
+    fn test_forwarding_loop_exits_on_stop_with_empty_queues() {
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let frame_queue: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+        let utterance_queue: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+        stop_tx.send(()).unwrap();
+
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            run_forwarding_loop(stop_rx, &frame_queue, &utterance_queue, |_| {}, |_| {});
+            let _ = exit_tx.send(());
+        });
+
+        assert!(
+            exit_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "loop did not exit after stop"
+        );
+        handle.join().expect("capture thread panicked");
+    }
+
+    #[test]
+    fn test_forwarding_loop_stops_when_stop_consumed_with_queued_utterance() {
+        // The exact failure the latch fixes: the stop message is consumed on
+        // the same iteration that drains a queued utterance. Without the
+        // latch the next try_recv sees an empty channel and the loop never
+        // exits, so capture (and inference) runs forever after Stop.
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let frame_queue: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+        let utterance_queue: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+        utterance_queue.lock().unwrap().push_back(vec![1, 2, 3]);
+        stop_tx.send(()).unwrap();
+
+        let (utterance_tx, utterance_rx) = mpsc::channel::<Vec<u8>>();
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            run_forwarding_loop(
+                stop_rx,
+                &frame_queue,
+                &utterance_queue,
+                |_| {},
+                |pcm| utterance_tx.send(pcm.to_vec()).unwrap(),
+            );
+            let _ = exit_tx.send(());
+        });
+
+        assert_eq!(
+            utterance_rx.recv_timeout(std::time::Duration::from_secs(5)).ok(),
+            Some(vec![1, 2, 3]),
+            "queued utterance was not processed"
+        );
+        assert!(
+            exit_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "loop did not exit after stop: the stop signal was swallowed"
+        );
+        handle.join().expect("capture thread panicked");
     }
 }
