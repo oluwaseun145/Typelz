@@ -1,5 +1,6 @@
 import type { DictationSettings } from '../types/dictation'
 import type { ChatCompletionMessage } from '../types/llm'
+import { DEFAULT_FORMATTING_RULES } from './buildFormatPrompt'
 
 /**
  * Temporary defaults until the dictation settings feature (build-plan item 11)
@@ -12,7 +13,7 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   self_correction_handling: true,
   punctuation_enabled: true,
   capitalization_enabled: true,
-  formatting_rules: {},
+  formatting_rules: DEFAULT_FORMATTING_RULES,
 }
 
 const ALWAYS_ON_CLAUSES: string[] = [

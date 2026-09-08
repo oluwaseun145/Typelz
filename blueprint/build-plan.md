@@ -9,7 +9,7 @@
 - [x] 5. **LLM provider abstraction** - provide a common interface for models, OpenAI-compatible chat completion first
 - [x] 6. **LLM response normalization** - normalize text, reasoning, tool calls, usage, and completion state; reasoning and text travel in separate channels from day one
 - [x] 7. **Dictation cleanup** - clean fillers, repetitions, false starts, self-corrections, punctuation, capitalization, and grammar without changing meaning
-- [ ] 8. **Text formatting** - convert spoken structure into paragraphs, bullet lists, numbered lists, headings, checklists, and other appropriate formatting
+- [x] 8. **Text formatting** - convert spoken structure into paragraphs, bullet lists, numbered lists, headings, checklists, and other appropriate formatting
 - [ ] 9. **System-wide text insertion** - insert final text into the currently active application (Windows SendInput)
 - [ ] 10. **Global dictation controls** - toggle-to-talk (default) and push-to-talk global hotkeys, plus stop/cancel controls
 - [ ] 11. **Dictation settings** - configure microphone, cleanup behavior, style, language, default model, hotkeys, and interaction sounds

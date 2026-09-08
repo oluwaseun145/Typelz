@@ -4,7 +4,7 @@ import SettingsWindow from './components/settings/SettingsWindow.vue'
 import { useMicrophone } from './composables/useMicrophone.ts'
 import { useTranscription } from './composables/useTranscription.ts'
 import { useProviders } from './composables/useProviders.ts'
-import { useDictationCleanup } from './composables/useDictationCleanup.ts'
+import { useDictationPipeline } from './composables/useDictationPipeline.ts'
 import type { ModelStatus } from './types/tauri.ts'
 
 const {
@@ -48,36 +48,34 @@ onError(() => {})
 const { providers, refresh: refreshProviders } = useProviders()
 
 const {
-  state: cleanupState,
-  cleanedText,
-  isFallback,
-  fallbackReason,
-  error: cleanupError,
-  cleanTranscript,
-} = useDictationCleanup()
+  state: pipelineState,
+  finalText,
+  cleanupStatus,
+  formattingStatus,
+  error: pipelineError,
+  processTranscript,
+} = useDictationPipeline()
 
 const selectedProviderId = ref<string | null>(null)
 
-const FALLBACK_LABELS: Record<string, string> = {
-  'empty-response': 'Cleanup returned no text, so the raw transcript is shown.',
-  truncated: 'Cleanup output was truncated, so the raw transcript is shown.',
-  'content-filter': 'The provider filtered the output, so the raw transcript is shown.',
-  'provider-error': 'Cleanup failed, so the raw transcript is shown.',
-  'no-provider': 'No provider is configured, so the raw transcript is shown.',
+function cleanupStatusLabel(): string {
+  if (cleanupStatus.value === 'applied') return 'Cleanup: applied'
+  if (cleanupStatus.value === 'fallback') return 'Cleanup: failed - raw transcript carried through'
+  return 'Cleanup: off'
 }
 
-function fallbackLabel(): string {
-  const reason = fallbackReason.value
-  if (!reason) return ''
-  return (
-    FALLBACK_LABELS[reason] ?? 'Cleanup did not produce text, so the raw transcript is shown.'
-  )
+function formattingStatusLabel(): string {
+  if (formattingStatus.value === 'applied') return 'Formatting: applied'
+  if (formattingStatus.value === 'fallback') {
+    return 'Formatting: failed - previous stage result carried through'
+  }
+  return 'Formatting: skipped'
 }
 
-async function handleClean(): Promise<void> {
+async function handleProcess(): Promise<void> {
   const providerId = selectedProviderId.value
   if (!providerId) return
-  await cleanTranscript(providerId, lastTranscript.value)
+  await processTranscript(providerId, lastTranscript.value)
 }
 
 const isModelDownloading = computed(() => isModelLoading.value && downloadProgress.value !== null)
@@ -205,9 +203,9 @@ refreshProviders().catch(() => {})
       </div>
     </section>
 
-    <!-- Dictation cleanup section (build-plan item 7) -->
+    <!-- Cleanup & Formatting section (build-plan items 7-8) -->
     <section class="cleanup-section">
-      <h2>Dictation Cleanup</h2>
+      <h2>Cleanup &amp; Formatting</h2>
 
       <div v-if="providers.length === 0" class="status">
         No providers configured yet. Add one in the LLM Providers section below.
@@ -232,28 +230,36 @@ refreshProviders().catch(() => {})
           <button
             class="btn btn-primary"
             :disabled="
-              cleanupState === 'cleaning' || lastTranscript.trim() === '' || !selectedProviderId
+              pipelineState === 'processing' || lastTranscript.trim() === '' || !selectedProviderId
             "
-            @click="handleClean"
+            @click="handleProcess"
           >
-            {{ cleanupState === 'cleaning' ? 'Cleaning...' : 'Clean Transcript' }}
+            {{ pipelineState === 'processing' ? 'Processing...' : 'Process Transcript' }}
           </button>
         </div>
 
         <p class="hint">
-          Pick a provider and press Clean Transcript to rewrite the transcript
-          above: fillers, repetitions, and false starts removed, punctuation and
-          capitalization added, meaning preserved.
+          Pick a provider and press Process Transcript: fillers, repetitions, and
+          false starts are removed, punctuation and capitalization added, and
+          spoken structure becomes lists, headings, and checklists. Meaning is
+          preserved.
         </p>
 
-        <div class="transcript-output" :class="{ empty: cleanedText.length === 0 }">
-          {{ cleanedText || 'No cleaned text yet.' }}
+        <div class="transcript-output" :class="{ empty: finalText.length === 0 }">
+          {{ finalText || 'No processed text yet.' }}
         </div>
 
-        <p v-if="isFallback" class="fallback-note">{{ fallbackLabel() }}</p>
+        <template v-if="pipelineState === 'done'">
+          <p class="status-line" :class="{ failed: cleanupStatus === 'fallback' }">
+            {{ cleanupStatusLabel() }}
+          </p>
+          <p class="status-line" :class="{ failed: formattingStatus === 'fallback' }">
+            {{ formattingStatusLabel() }}
+          </p>
+        </template>
 
-        <div v-if="cleanupError" class="error-display">
-          <p class="error-text">{{ cleanupError }}</p>
+        <div v-if="pipelineError" class="error-display">
+          <p class="error-text">{{ pipelineError }}</p>
         </div>
       </template>
     </section>
@@ -446,9 +452,13 @@ refreshProviders().catch(() => {})
   color: var(--text-h);
 }
 
-.fallback-note {
-  margin: 8px 0 0;
+.status-line {
+  margin: 4px 0 0;
   font-size: 13px;
+  color: var(--text);
+}
+
+.status-line.failed {
   color: #b45309;
 }
 </style>
