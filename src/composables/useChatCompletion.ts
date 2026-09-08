@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { ChatCompletionMessage, ChatCompletionResponse } from '../types/llm'
+import type { ChatCompletionMessage, NormalizedLlmResponse } from '../types/llm'
 
 /** Optional sampling parameters; omitted fields fall back to provider defaults. */
 export type ChatCompletionOptions = {
@@ -25,13 +25,13 @@ export function useChatCompletion() {
     providerId: string,
     messages: ChatCompletionMessage[],
     options?: ChatCompletionOptions,
-  ): Promise<ChatCompletionResponse | null> {
+  ): Promise<NormalizedLlmResponse | null> {
     loading.value = true
     error.value = null
     try {
       // Keys are camelCase per Tauri's default argument naming; `null` (not
       // `undefined`) keeps the optional keys present for Rust.
-      return await invoke<ChatCompletionResponse>('send_chat_completion', {
+      return await invoke<NormalizedLlmResponse>('send_chat_completion', {
         providerId,
         messages,
         temperature: options?.temperature ?? null,

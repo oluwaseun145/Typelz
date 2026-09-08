@@ -8,11 +8,37 @@ use crate::providers::{models_url, AppDataStore, CredentialStore, KIND_OPENAI_CO
 /// Default timeout for a chat completion round trip, in seconds.
 pub const CHAT_COMPLETION_TIMEOUT_SECS: u64 = 30;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatCompletionMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<RawToolCall>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RawToolCall {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub function: RawFunction,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct RawFunction {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<serde_json::Value>,
 }
 
 /// OpenAI wire format; unset parameters are omitted so the provider applies
@@ -35,7 +61,8 @@ pub struct ChatCompletionRequest {
 #[serde(rename_all = "snake_case")]
 pub struct ChatCompletionChoice {
     pub message: ChatCompletionMessage,
-    pub finish_reason: String,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +111,190 @@ struct ModelListEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatCompletionResponse {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub choices: Vec<ChatCompletionChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatCompletionUsage>,
+}
+
+/// Canonical finish reason, normalized from provider-specific strings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+    Error,
+    Unknown(String),
+}
+
+impl FinishReason {
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            Some("stop") => Self::Stop,
+            Some("length") => Self::Length,
+            Some("tool_calls") | Some("tool-calls") => Self::ToolCalls,
+            Some("content_filter") | Some("content-filter") => Self::ContentFilter,
+            Some(other) => Self::Unknown(other.to_lowercase()),
+            None => Self::Unknown(String::new()),
+        }
+    }
+}
+
+/// Normalized tool call with guaranteed string fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct NormalizedToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Normalized token usage with u32 defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct NormalizedUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+/// The canonical response shape that crosses the Tauri boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct NormalizedResponse {
     pub id: String,
     pub model: String,
-    pub choices: Vec<ChatCompletionChoice>,
-    pub usage: ChatCompletionUsage,
+    pub text: String,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<NormalizedToolCall>,
+    pub usage: NormalizedUsage,
+    pub finish_reason: FinishReason,
+}
+
+fn normalize_tool_calls(raw_calls: Option<&Vec<RawToolCall>>) -> Vec<NormalizedToolCall> {
+    let Some(calls) = raw_calls else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .map(|call| NormalizedToolCall {
+            id: call.id.clone().unwrap_or_default(),
+            name: call.function.name.clone().unwrap_or_default(),
+            arguments: call
+                .function
+                .arguments
+                .as_ref()
+                .map(|v| {
+                    if v.is_string() {
+                        v.as_str().unwrap().to_string()
+                    } else {
+                        v.to_string()
+                    }
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn extract_reasoning(message: &ChatCompletionMessage) -> Option<String> {
+    if let Some(content) = message.reasoning_content.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return Some(content.to_string());
+    }
+    if let Some(value) = message.reasoning.as_ref() {
+        return match value {
+            serde_json::Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+            }
+            serde_json::Value::Array(items) => {
+                let joined: String = items
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if joined.trim().is_empty() { None } else { Some(joined.trim().to_string()) }
+            }
+            other => {
+                let s = other.to_string();
+                let trimmed = s.trim();
+                if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+            }
+        };
+    }
+    if let Some(details) = message.reasoning_details.as_ref() {
+        if let serde_json::Value::Array(items) = details {
+            let joined: String = items
+                .iter()
+                .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !joined.trim().is_empty() {
+                return Some(joined.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn normalize_usage(usage: Option<&ChatCompletionUsage>) -> NormalizedUsage {
+    let u = match usage {
+        Some(u) => u,
+        None => {
+            return NormalizedUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            }
+        }
+    };
+    let prompt = u.prompt_tokens;
+    let completion = u.completion_tokens;
+    let total = if u.total_tokens == 0 {
+        prompt.saturating_add(completion)
+    } else {
+        u.total_tokens
+    };
+    NormalizedUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    }
+}
+
+/// Pure normalization: turns a raw provider response into the canonical shape.
+pub fn normalize_response(raw: ChatCompletionResponse) -> NormalizedResponse {
+    let (text, reasoning, tool_calls, finish_reason) = match raw.choices.first() {
+        Some(choice) => {
+            let text = choice.message.content.trim().to_string();
+            let reasoning = extract_reasoning(&choice.message);
+            let tool_calls = normalize_tool_calls(choice.message.tool_calls.as_ref());
+            let finish_reason = FinishReason::from_raw(choice.finish_reason.as_deref());
+            (text, reasoning, tool_calls, finish_reason)
+        }
+        None => (
+            String::new(),
+            None,
+            Vec::new(),
+            FinishReason::Unknown(String::new()),
+        ),
+    };
+    NormalizedResponse {
+        id: raw.id,
+        model: raw.model,
+        text,
+        reasoning,
+        tool_calls,
+        usage: normalize_usage(raw.usage.as_ref()),
+        finish_reason,
+    }
 }
 
 /// The `error` object a provider returns in a failed response body.
@@ -338,7 +545,7 @@ fn chat_for_provider(
     messages: Vec<ChatCompletionMessage>,
     temperature: Option<f64>,
     max_tokens: Option<u32>,
-) -> Result<ChatCompletionResponse, String> {
+) -> Result<NormalizedResponse, String> {
     let store = AppDataStore::load(&AppDataStore::app_path(&app)?)?;
     let provider = store
         .get(&provider_id)
@@ -349,7 +556,8 @@ fn chat_for_provider(
         .ok_or_else(|| format!("No API key is stored for provider {provider_id}."))?;
 
     let adapter = adapter_for_provider(&provider.base_url, &provider.model, &api_key, &provider.kind)?;
-    adapter.complete(messages, temperature, max_tokens)
+    let raw = adapter.complete(messages, temperature, max_tokens)?;
+    Ok(normalize_response(raw))
 }
 
 /// Send a chat completion to a stored provider. The API key is resolved from
@@ -362,7 +570,7 @@ pub async fn send_chat_completion(
     messages: Vec<ChatCompletionMessage>,
     temperature: Option<f64>,
     max_tokens: Option<u32>,
-) -> Result<ChatCompletionResponse, String> {
+) -> Result<NormalizedResponse, String> {
     let credentials = Arc::clone(&credentials);
     tauri::async_runtime::spawn_blocking(move || {
         chat_for_provider(
@@ -467,10 +675,18 @@ mod tests {
                 ChatCompletionMessage {
                     role: "system".to_string(),
                     content: "You are a helpful assistant.".to_string(),
+                    reasoning_content: None,
+                    reasoning: None,
+                    reasoning_details: None,
+                    tool_calls: None,
                 },
                 ChatCompletionMessage {
                     role: "user".to_string(),
                     content: "Hello world".to_string(),
+                    reasoning_content: None,
+                    reasoning: None,
+                    reasoning_details: None,
+                    tool_calls: None,
                 },
             ],
             temperature: Some(0.2),
@@ -499,6 +715,10 @@ mod tests {
             messages: vec![ChatCompletionMessage {
                 role: "user".to_string(),
                 content: "x".to_string(),
+                reasoning_content: None,
+                reasoning: None,
+                reasoning_details: None,
+                tool_calls: None,
             }],
             temperature: None,
             max_tokens: None,
@@ -516,23 +736,47 @@ mod tests {
         assert_eq!(response.model, "gpt-4o-mini");
         assert_eq!(response.choices[0].message.role, "assistant");
         assert_eq!(response.choices[0].message.content, "Hi there.");
-        assert_eq!(response.choices[0].finish_reason, "stop");
-        assert_eq!(response.usage.total_tokens, 15);
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(response.usage.as_ref().unwrap().total_tokens, 15);
     }
 
     #[test]
     fn response_deserializes_without_optional_fields() {
         let full: ChatCompletionResponse = serde_json::from_str(FULL_RESPONSE).unwrap();
         let minimal: ChatCompletionResponse = serde_json::from_str(MINIMAL_RESPONSE).unwrap();
-        assert_eq!(full.choices[0].message, minimal.choices[0].message);
-        assert_eq!(full.usage, minimal.usage);
+        assert_eq!(full.choices[0].message.role, minimal.choices[0].message.role);
+        assert_eq!(full.usage.as_ref().unwrap().total_tokens, minimal.usage.as_ref().unwrap().total_tokens);
     }
 
     #[test]
-    fn response_without_usage_is_invalid() {
+    fn response_without_usage_is_valid() {
         let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"c"},"finish_reason":"stop"}]}"#;
-        let err = serde_json::from_str::<ChatCompletionResponse>(body).unwrap_err();
-        assert!(err.to_string().contains("usage"), "{err}");
+        let response: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        assert!(response.usage.is_none());
+    }
+
+    #[test]
+    fn response_with_null_finish_reason_is_valid() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"c"},"finish_reason":null}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let response: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(response.choices[0].finish_reason, None);
+    }
+
+    #[test]
+    fn response_with_reasoning_content_deserializes() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"c","reasoning_content":"let me think"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let response: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(response.choices[0].message.reasoning_content.as_deref(), Some("let me think"));
+    }
+
+    #[test]
+    fn response_with_tool_calls_deserializes() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","function":{"name":"do_it","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let response: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        let calls = response.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(calls[0].function.name.as_deref(), Some("do_it"));
     }
 
     #[test]
@@ -587,7 +831,7 @@ mod tests {
         let response: ChatCompletionResponse = serde_json::from_str(MINIMAL_RESPONSE).unwrap();
         let remade: ChatCompletionResponse =
             serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
-        assert_eq!(remade.usage, response.usage);
+        assert_eq!(remade.usage.as_ref().unwrap().total_tokens, response.usage.as_ref().unwrap().total_tokens);
         assert_eq!(remade.choices[0].message.content, response.choices[0].message.content);
     }
 
@@ -634,5 +878,64 @@ mod tests {
     fn model_list_parse_rejects_not_json() {
         let err = parse_model_list("<html>bad gateway</html>").unwrap_err();
         assert!(err.contains("invalid model list"), "{err}");
+    }
+
+    #[test]
+    fn normalize_response_happy_path() {
+        let raw: ChatCompletionResponse = serde_json::from_str(FULL_RESPONSE).unwrap();
+        let n = normalize_response(raw);
+        assert_eq!(n.text, "Hi there.");
+        assert_eq!(n.reasoning, None);
+        assert!(n.tool_calls.is_empty());
+        assert_eq!(n.finish_reason, FinishReason::Stop);
+        assert_eq!(n.usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn normalize_response_extracts_reasoning_content() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"done","reasoning_content":"let me think"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let raw: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        let n = normalize_response(raw);
+        assert_eq!(n.text, "done");
+        assert_eq!(n.reasoning.as_deref(), Some("let me think"));
+    }
+
+    #[test]
+    fn normalize_response_extracts_tool_calls() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","function":{"name":"do_it","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let raw: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        let n = normalize_response(raw);
+        assert_eq!(n.tool_calls.len(), 1);
+        assert_eq!(n.tool_calls[0].id, "c1");
+        assert_eq!(n.tool_calls[0].name, "do_it");
+        assert_eq!(n.finish_reason, FinishReason::ToolCalls);
+    }
+
+    #[test]
+    fn normalize_response_empty_choices() {
+        let body = r#"{"id":"x","model":"m","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}"#;
+        let raw: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        let n = normalize_response(raw);
+        assert_eq!(n.text, "");
+        assert_eq!(n.reasoning, None);
+        assert!(n.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn normalize_response_unknown_finish_reason() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"c"},"finish_reason":"weird"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let raw: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        let n = normalize_response(raw);
+        assert_eq!(n.finish_reason, FinishReason::Unknown("weird".to_string()));
+    }
+
+    #[test]
+    fn normalize_response_missing_usage_defaults_zero() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"c"},"finish_reason":"stop"}]}"#;
+        let raw: ChatCompletionResponse = serde_json::from_str(body).unwrap();
+        let n = normalize_response(raw);
+        assert_eq!(n.usage.prompt_tokens, 0);
+        assert_eq!(n.usage.completion_tokens, 0);
+        assert_eq!(n.usage.total_tokens, 0);
     }
 }

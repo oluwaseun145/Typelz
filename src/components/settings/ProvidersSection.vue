@@ -214,9 +214,12 @@ async function runChatTest(provider: ProviderSummary): Promise<void> {
     { role: 'user', content: 'Say hello in one sentence.' },
   ])
   if (response) {
+    const display = response.reasoning
+      ? `${response.text}\n\nReasoning: ${response.reasoning}`
+      : response.text
     chatResult.value = {
       ...chatResult.value,
-      [provider.id]: response.choices[0]?.message?.content ?? 'No response content',
+      [provider.id]: display || 'No response content',
     }
   } else {
     chatResult.value = {

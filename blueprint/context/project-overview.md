@@ -1,6 +1,6 @@
 # Typelz - Project Overview
 
-<!-- blueprint:source-hash f53a3fee92a46aba61e98606fa3f42b62f65ee8bee9aa5ed8f0348ad39586f76 -->
+<!-- blueprint:source-hash c88e8751bc59a0fbfdd5b6819a10c50c3de8012ee58b044606aadbc6d7ffd717 -->
 
 > System-wide AI voice dictation for Windows: local Parakeet STT + BYOK LLM
 > cleanup, inserted into the active application via global hotkey.

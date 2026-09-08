@@ -7,7 +7,7 @@
 - [x] 3. **Parakeet transcription** - run Parakeet TDT v3 INT8 locally via ONNX Runtime on CPU with VAD-gated utterance detection, lazy model load, and one-time model download
 - [x] 4. **BYOK provider configuration** - let users add, validate, edit, and remove their own LLM provider credentials in the OS keychain
 - [x] 5. **LLM provider abstraction** - provide a common interface for models, OpenAI-compatible chat completion first
-- [ ] 6. **LLM response normalization** - normalize text, reasoning, tool calls, usage, and completion state; reasoning and text travel in separate channels from day one
+- [x] 6. **LLM response normalization** - normalize text, reasoning, tool calls, usage, and completion state; reasoning and text travel in separate channels from day one
 - [ ] 7. **Dictation cleanup** - clean fillers, repetitions, false starts, self-corrections, punctuation, capitalization, and grammar without changing meaning
 - [ ] 8. **Text formatting** - convert spoken structure into paragraphs, bullet lists, numbered lists, headings, checklists, and other appropriate formatting
 - [ ] 9. **System-wide text insertion** - insert final text into the currently active application (Windows SendInput)
