@@ -298,6 +298,7 @@ pub fn run() {
         providers::validate_provider,
         providers::test_provider_credentials,
         llm::send_chat_completion,
+        llm::list_provider_models,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

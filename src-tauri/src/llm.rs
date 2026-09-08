@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::providers::{AppDataStore, CredentialStore};
+use crate::providers::{models_url, AppDataStore, CredentialStore, KIND_OPENAI_COMPATIBLE};
 
 /// Default timeout for a chat completion round trip, in seconds.
 pub const CHAT_COMPLETION_TIMEOUT_SECS: u64 = 30;
@@ -44,6 +44,41 @@ pub struct ChatCompletionUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+}
+
+/// A model as reported by a provider's model-listing endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+}
+
+/// A provider backend that can run chat completions. Implementations do
+/// blocking network I/O and must be dispatched to a worker thread.
+pub trait ProviderAdapter: Send + Sync {
+    fn complete(
+        &self,
+        messages: Vec<ChatCompletionMessage>,
+        temperature: Option<f64>,
+        max_tokens: Option<u32>,
+    ) -> Result<ChatCompletionResponse, String>;
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>, String>;
+}
+
+/// The `data[]` envelope of an OpenAI-compatible model-list response.
+#[derive(Debug, Deserialize)]
+struct ModelListResponse {
+    #[serde(default)]
+    data: Vec<ModelListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelListEntry {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +220,116 @@ fn complete_once(
     Err(classify_chat_status(status, &text))
 }
 
+/// OpenAI-compatible backend: chat completions plus model listing against the
+/// same base URL.
+pub struct OpenAIAdapter {
+    base_url: String,
+    model: String,
+    api_key: String,
+}
+
+impl OpenAIAdapter {
+    fn new(base_url: String, model: String, api_key: String) -> Self {
+        Self {
+            base_url,
+            model,
+            api_key,
+        }
+    }
+}
+
+impl ProviderAdapter for OpenAIAdapter {
+    fn complete(
+        &self,
+        messages: Vec<ChatCompletionMessage>,
+        temperature: Option<f64>,
+        max_tokens: Option<u32>,
+    ) -> Result<ChatCompletionResponse, String> {
+        let request = ChatCompletionRequest {
+            model: self.model.clone(),
+            messages,
+            temperature,
+            max_tokens,
+            stream: false,
+        };
+        complete_once(&self.base_url, &self.api_key, &request)
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelInfo>, String> {
+        list_models_once(&self.base_url, &self.api_key)
+    }
+}
+
+/// Build the adapter for a stored provider's kind. Unknown kinds fail here,
+/// not at request time.
+pub fn adapter_for_provider(
+    base_url: &str,
+    model: &str,
+    api_key: &str,
+    kind: &str,
+) -> Result<Box<dyn ProviderAdapter>, String> {
+    match kind {
+        KIND_OPENAI_COMPATIBLE => Ok(Box::new(OpenAIAdapter::new(
+            base_url.to_string(),
+            model.to_string(),
+            api_key.to_string(),
+        ))),
+        other => Err(format!("Unsupported provider kind: {other}")),
+    }
+}
+
+fn parse_model_list(text: &str) -> Result<Vec<ModelInfo>, String> {
+    let parsed: ModelListResponse = serde_json::from_str(text)
+        .map_err(|e| format!("The provider returned an invalid model list: {e}"))?;
+    Ok(parsed
+        .data
+        .into_iter()
+        .map(|entry| ModelInfo {
+            // Most OpenAI-compatible endpoints omit a display name.
+            name: entry.name.unwrap_or_else(|| entry.id.clone()),
+            id: entry.id,
+        })
+        .collect())
+}
+
+/// One model-listing round trip. Runs blocking network I/O, so callers must
+/// dispatch it to a worker thread.
+fn list_models_once(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(CHAT_COMPLETION_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Could not start the HTTP client: {e}"))?;
+
+    let response = match client
+        .get(models_url(base_url))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
+        .send()
+    {
+        Ok(response) => response,
+        Err(e) if e.is_timeout() => {
+            return Err(format!(
+                "The provider did not respond within {CHAT_COMPLETION_TIMEOUT_SECS} seconds. Check the base URL and your network."
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
+                "Could not reach the provider at the base URL: {e}"
+            ))
+        }
+    };
+
+    let status = response.status().as_u16();
+    let text = response
+        .text()
+        .map_err(|e| format!("Could not read the provider response: {e}"))?;
+
+    if !(200..300).contains(&status) {
+        return Err(classify_chat_status(status, &text));
+    }
+
+    parse_model_list(&text)
+}
+
 /// Resolve the stored provider and its stored key, then run one completion.
 fn chat_for_provider(
     app: tauri::AppHandle,
@@ -203,14 +348,8 @@ fn chat_for_provider(
         .get(&provider.id)?
         .ok_or_else(|| format!("No API key is stored for provider {provider_id}."))?;
 
-    let request = ChatCompletionRequest {
-        model: provider.model.clone(),
-        messages,
-        temperature,
-        max_tokens,
-        stream: false,
-    };
-    complete_once(&provider.base_url, &api_key, &request)
+    let adapter = adapter_for_provider(&provider.base_url, &provider.model, &api_key, &provider.kind)?;
+    adapter.complete(messages, temperature, max_tokens)
 }
 
 /// Send a chat completion to a stored provider. The API key is resolved from
@@ -239,6 +378,41 @@ pub async fn send_chat_completion(
     .map_err(|e| format!("Chat completion task failed to run: {e}"))?
 }
 
+/// Resolve the stored provider and its stored key, then list its models.
+fn models_for_provider(
+    app: tauri::AppHandle,
+    credentials: Arc<dyn CredentialStore>,
+    provider_id: String,
+) -> Result<Vec<ModelInfo>, String> {
+    let store = AppDataStore::load(&AppDataStore::app_path(&app)?)?;
+    let provider = store
+        .get(&provider_id)
+        .cloned()
+        .ok_or_else(|| format!("Provider not found: {provider_id}"))?;
+    let api_key = credentials
+        .get(&provider.id)?
+        .ok_or_else(|| format!("No API key is stored for provider {provider_id}."))?;
+
+    let adapter = adapter_for_provider(&provider.base_url, &provider.model, &api_key, &provider.kind)?;
+    adapter.list_models()
+}
+
+/// List the models a stored provider reports. The API key is resolved from
+/// the OS credential store; it never crosses the JS boundary.
+#[tauri::command]
+pub async fn list_provider_models(
+    app: tauri::AppHandle,
+    credentials: tauri::State<'_, Arc<dyn CredentialStore>>,
+    provider_id: String,
+) -> Result<Vec<ModelInfo>, String> {
+    let credentials = Arc::clone(&credentials);
+    tauri::async_runtime::spawn_blocking(move || {
+        models_for_provider(app, credentials, provider_id)
+    })
+    .await
+    .map_err(|e| format!("Model list task failed to run: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +434,14 @@ mod tests {
             "total_tokens": 15
         },
         "system_fingerprint": "fp_42"
+    }"#;
+
+    const MODEL_LIST_RESPONSE: &str = r#"{
+        "object": "list",
+        "data": [
+            { "id": "gpt-4o", "object": "model", "created": 1, "owned_by": "openai" },
+            { "id": "llama-3-70b", "object": "model", "name": "Llama 3 70B" }
+        ]
     }"#;
 
     const MINIMAL_RESPONSE: &str = r#"{
@@ -407,5 +589,50 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
         assert_eq!(remade.usage, response.usage);
         assert_eq!(remade.choices[0].message.content, response.choices[0].message.content);
+    }
+
+    #[test]
+    fn adapter_for_provider_returns_openai() {
+        let adapter = adapter_for_provider(
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+            "sk-test",
+            KIND_OPENAI_COMPATIBLE,
+        )
+        .expect("OpenAI-compatible kind should build an adapter");
+        // Construction is the observable contract here; calling the methods
+        // would need a live endpoint.
+        let _: Box<dyn ProviderAdapter> = adapter;
+    }
+
+    #[test]
+    fn adapter_for_provider_rejects_unknown_kind() {
+        let result = adapter_for_provider("https://api.openai.com/v1", "m", "sk-test", "anthropic");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("unknown kinds must fail at construction"),
+        };
+        assert!(err.contains("anthropic"), "{err}");
+    }
+
+    #[test]
+    fn model_list_parse_extracts_id_and_name() {
+        let models = parse_model_list(MODEL_LIST_RESPONSE).unwrap();
+        assert_eq!(models, vec![
+            ModelInfo {
+                id: "gpt-4o".to_string(),
+                name: "gpt-4o".to_string(),
+            },
+            ModelInfo {
+                id: "llama-3-70b".to_string(),
+                name: "Llama 3 70B".to_string(),
+            },
+        ]);
+    }
+
+    #[test]
+    fn model_list_parse_rejects_not_json() {
+        let err = parse_model_list("<html>bad gateway</html>").unwrap_err();
+        assert!(err.contains("invalid model list"), "{err}");
     }
 }

@@ -36,6 +36,20 @@ fn empty_capabilities() -> Value {
     Value::Object(Map::new())
 }
 
+/// Static capability defaults per kind. Not a live probe; feature 6 is what
+/// starts gating behavior on these.
+fn default_capabilities(kind: &str) -> Value {
+    match kind {
+        KIND_OPENAI_COMPATIBLE => {
+            let mut caps = Map::new();
+            caps.insert("supports_streaming".to_string(), Value::Bool(false));
+            caps.insert("supports_system_messages".to_string(), Value::Bool(true));
+            Value::Object(caps)
+        }
+        _ => Value::Object(Map::new()),
+    }
+}
+
 impl Provider {
     /// Summary safe to send to the webview and log: no key material.
     pub fn summary(&self, has_key: bool) -> ProviderSummary {
@@ -449,7 +463,7 @@ impl ProviderService {
             kind: KIND_OPENAI_COMPATIBLE.to_string(),
             base_url,
             model,
-            capabilities: Value::Object(Map::new()),
+            capabilities: default_capabilities(KIND_OPENAI_COMPATIBLE),
             enabled: true,
         };
 
@@ -507,6 +521,11 @@ impl ProviderService {
             }
             if let Some(v) = input.enabled {
                 p.enabled = v;
+            }
+            // Backfill capability defaults for providers created before
+            // defaults existed; never overwrite values that are already set.
+            if p.capabilities == Value::Object(Map::new()) {
+                p.capabilities = default_capabilities(&p.kind);
             }
             Ok(())
         })?;
@@ -584,7 +603,7 @@ pub fn validate_base_url(raw: &str) -> Result<String, String> {
     }
 }
 
-fn models_url(base_url: &str) -> String {
+pub(crate) fn models_url(base_url: &str) -> String {
     let root = base_url.trim_end_matches('/');
     format!("{root}/models")
 }
@@ -933,7 +952,13 @@ mod tests {
         assert!(summary.has_key);
         assert!(summary.enabled);
         assert_eq!(summary.kind, KIND_OPENAI_COMPATIBLE);
-        assert_eq!(summary.capabilities, Value::Object(Map::new()));
+        assert_eq!(
+            summary.capabilities,
+            serde_json::json!({
+                "supports_streaming": false,
+                "supports_system_messages": true
+            })
+        );
         assert_eq!(credentials.stored(&summary.id).as_deref(), Some("sk-test"));
 
         let reopened = service_in(&dir, Arc::new(FakingCredentialStore::default()));

@@ -1,6 +1,6 @@
 # Typelz - Project Overview
 
-<!-- blueprint:source-hash 8fa1a637f5a3d3adf3b4ac26efec08052d216acd7ab9be25a00a1bcb1b06515d -->
+<!-- blueprint:source-hash f53a3fee92a46aba61e98606fa3f42b62f65ee8bee9aa5ed8f0348ad39586f76 -->
 
 > System-wide AI voice dictation for Windows: local Parakeet STT + BYOK LLM
 > cleanup, inserted into the active application via global hotkey.
@@ -30,17 +30,19 @@ Build-plan order (v1 items 1-14, then v1.1 items 15-22):
 
 1. **Desktop application shell** ✓ - Vue + TypeScript app with Tauri integration
    (tray icon, settings window, typed command/event channel).
-2. **Microphone capture** ✓ - Start, stop, device selection; frame streaming to Rust core.
-3. **Parakeet transcription** - Local STT via ONNX Runtime on CPU: VAD-gated
+2. **Microphone capture** ✓ - Start, stop, device selection; frame streaming to
+   Rust core.
+3. **Parakeet transcription** ✓ - Local STT via ONNX Runtime on CPU: VAD-gated
    utterance detection, lazy model load, one-time ~670 MB download.
-4. **BYOK provider configuration** - Add, validate, edit, remove LLM provider
+4. **BYOK provider configuration** ✓ - Add, validate, edit, remove LLM provider
    credentials stored in the OS keychain.
 5. **LLM provider abstraction** - Common interface for models; OpenAI-compatible
    chat completion as the first adapter.
 6. **LLM response normalization** - Normalize text, reasoning, tool calls, usage,
-   and completion state; reasoning and text travel in separate channels from day one.
-7. **Dictation cleanup** - Remove fillers, repetitions, false starts, self-corrections;
-   add punctuation, capitalization, grammar — without changing meaning.
+   and completion state; reasoning and text travel in separate channels.
+7. **Dictation cleanup** - Remove fillers, repetitions, false starts,
+   self-corrections; add punctuation, capitalization, grammar — without changing
+   meaning.
 8. **Text formatting** - Convert spoken structure into paragraphs, bullet lists,
    numbered lists, headings, checklists.
 9. **System-wide text insertion** - Insert final text at cursor in the active
@@ -58,11 +60,13 @@ Build-plan order (v1 items 1-14, then v1.1 items 15-22):
     spellings.
 16. **Application profiles** - Different instructions, styles, vocabulary, models
     per application.
-17. **Dictation history** - Optional store, search, copy, delete previous dictations.
+17. **Dictation history** - Optional store, search, copy, delete previous
+    dictations.
 18. **Privacy controls** - Show what stays local vs. sent; controls for history
     and data retention.
 19. **Provider/model routing** - Different models for different AI tasks.
-20. **Performance and streaming** - Optimize pipeline for low latency on target CPU.
+20. **Performance and streaming** - Optimize pipeline for low latency on target
+    CPU.
 21. **Thinking-model support** - Full support for reasoning-output providers;
     builds on item 6's channel separation.
 22. **Linux release** - Package and validate on Linux.
@@ -85,7 +89,8 @@ but not in scope for v1/v1.1.
 
 ### UserPreferences
 
-- `dictation_style` (enum: casual | professional | formal | friendly | concise | custom)
+- `dictation_style` (enum: casual | professional | formal | friendly | concise
+  | custom)
 - `default_language` (string, default "en")
 - `interaction_sound_enabled` (boolean)
 - `start_stop_sounds` (object: start, stop, error sound paths or IDs)
@@ -100,7 +105,7 @@ but not in scope for v1/v1.1.
 - `capitalization_enabled` (boolean)
 - `formatting_rules` (object) - paragraph, list, heading rules
 
-### PersonalDictionaryEntry
+### PersonalDictionaryEntry (v1.1, feature 15)
 
 - `id` (string/UUID)
 - `word` (string) - the term to recognize
@@ -109,7 +114,7 @@ but not in scope for v1/v1.1.
 - `application_scope` (enum: global | app-specific)
 - `app_filter` (string, optional) - target application executable name
 
-### ApplicationProfile
+### ApplicationProfile (v1.1, feature 16)
 
 - `id` (string/UUID)
 - `executable_name` (string) - e.g. "code.exe", "chrome.exe"
@@ -118,7 +123,7 @@ but not in scope for v1/v1.1.
 - `model_override` (string, optional) - different model for this app
 - `vocabulary_ids` (string[]) - linked personal dictionary entries
 
-### DictationHistoryEntry
+### DictationHistoryEntry (v1.1, feature 17)
 
 - `id` (string/UUID)
 - `raw_transcript` (string) - original Parakeet output
@@ -133,9 +138,10 @@ but not in scope for v1/v1.1.
 - `last_error` (string, nullable)
 - `feature_flags` (object) - internal toggle state
 
-> **Lock note:** ProviderConfig and DictationSettings are consumed by features 4-8.
-> PersonalDictionaryEntry and ApplicationProfile are consumed by features 15-16.
-> DictationHistoryEntry is consumed by feature 17 only when the user enables history.
+> **Lock note:** ProviderConfig and DictationSettings are consumed by features
+> 4-8. PersonalDictionaryEntry and ApplicationProfile are consumed by features
+> 15-16. DictationHistoryEntry is consumed by feature 17 only when the user
+> enables history.
 
 ## Tech stack
 
@@ -165,15 +171,16 @@ streams: premium features, optional hosted services, team/workspace features.
 **Feel:** fast, lightweight, modern, unobtrusive. No unnecessary animations or
 delays — dictation is interaction where responsiveness matters.
 
-**Main flow:** Microphone → Parakeet → Raw transcript → LLM → Cleaned text → Active app.
+**Main flow:** Microphone → Parakeet → Raw transcript → LLM → Cleaned text →
+Active app.
 
 **Routes/screens:**
 
 - **Settings window** - Provider config, model selection, cleanup/style, personal
   dictionary, application profiles, history/privacy, keyboard shortcuts.
 - **Voice bar overlay** - Appears on hotkey press; shows recording state, audio
-  level; turns to "processing" during transcription/cleanup; dismisses after
-  text insertion.
+  level; turns to "processing" during transcription/cleanup; dismisses after text
+  insertion.
 - **System tray icon** - Quick access to settings and dictation toggle.
 
 The user should always see which provider/model is active. Errors must be
@@ -205,5 +212,5 @@ actionable and understandable.
 > is planned yet.
 >
 > **Fallback STT engine** — whisper.cpp documented as a second engine behind the
-> same Rust interface if Parakeet underperforms on target hardware. This is an
-> engine swap, not a redesign — no implementation work needed now.
+> same Rust interface if Parakeet underperforms on target hardware. Engine swap,
+> not a redesign — no implementation work needed now.

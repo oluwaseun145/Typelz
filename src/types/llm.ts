@@ -38,3 +38,9 @@ export interface ChatCompletionError {
   code: string
   message: string
 }
+
+/** A model as reported by a provider's model-listing endpoint. */
+export interface ListModelResponse {
+  id: string
+  name: string
+}
