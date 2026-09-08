@@ -60,8 +60,9 @@
 
 ## Validation and error handling
 
-- > TODO: no validation library is configured; pick one (e.g. Zod) in the first
-  feature that needs input validation and record it here
+- Zod for frontend input validation (chosen in the BYOK provider
+  configuration spec, build-plan item 4); Rust re-validates every mutation,
+  so the UI is not the trust boundary
 - Surface provider, microphone, and pipeline errors as actionable,
   human-readable messages; never send audio anywhere
 - Distinguish local errors (audio, Parakeet) from provider errors

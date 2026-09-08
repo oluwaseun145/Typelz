@@ -1,5 +1,6 @@
 mod audio;
 mod model;
+mod providers;
 mod transcribe;
 mod vad;
 
@@ -274,6 +275,7 @@ pub fn run() {
         model_cache: Mutex::new(None),
         transcription_engine: Arc::new(Mutex::new(None)),
     })
+    .manage(Arc::new(providers::KeyringCredentialStore) as Arc<dyn providers::CredentialStore>)
     .setup(|_app| {
       Ok(())
     })
@@ -285,6 +287,12 @@ pub fn run() {
         transcribe_stop,
         start_capture,
         stop_capture,
+        providers::list_providers,
+        providers::add_provider,
+        providers::update_provider,
+        providers::remove_provider,
+        providers::validate_provider,
+        providers::test_provider_credentials,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

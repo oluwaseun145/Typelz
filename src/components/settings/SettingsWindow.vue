@@ -1,10 +1,17 @@
+<script setup lang="ts">
+import ProvidersSection from './ProvidersSection.vue'
+</script>
+
 <template>
   <div class="settings-window">
     <header class="settings-header">
       <h1>Typelz Settings</h1>
     </header>
     <main class="settings-body">
-      <p class="empty-state">No settings configured yet.</p>
+      <section class="settings-section">
+        <h2>LLM Providers</h2>
+        <ProvidersSection />
+      </section>
     </main>
   </div>
 </template>
@@ -14,6 +21,7 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 480px;
 }
 
 .settings-header {
@@ -29,14 +37,13 @@
 
 .settings-body {
   flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px;
+  overflow-y: auto;
+  padding: 24px 32px 32px;
 }
 
-.empty-state {
-  color: var(--text);
-  font-size: 16px;
+.settings-section h2 {
+  font-size: 18px;
+  margin: 0 0 16px;
+  color: var(--text-h);
 }
 </style>
