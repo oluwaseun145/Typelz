@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import SettingsWindow from './components/settings/SettingsWindow.vue'
 import { useMicrophone } from './composables/useMicrophone.ts'
 import { useTranscription } from './composables/useTranscription.ts'
+import { useProviders } from './composables/useProviders.ts'
+import { useDictationCleanup } from './composables/useDictationCleanup.ts'
 import type { ModelStatus } from './types/tauri.ts'
 
 const {
@@ -43,6 +45,41 @@ onResult()
 onModelStatus()
 onError(() => {})
 
+const { providers, refresh: refreshProviders } = useProviders()
+
+const {
+  state: cleanupState,
+  cleanedText,
+  isFallback,
+  fallbackReason,
+  error: cleanupError,
+  cleanTranscript,
+} = useDictationCleanup()
+
+const selectedProviderId = ref<string | null>(null)
+
+const FALLBACK_LABELS: Record<string, string> = {
+  'empty-response': 'Cleanup returned no text, so the raw transcript is shown.',
+  truncated: 'Cleanup output was truncated, so the raw transcript is shown.',
+  'content-filter': 'The provider filtered the output, so the raw transcript is shown.',
+  'provider-error': 'Cleanup failed, so the raw transcript is shown.',
+  'no-provider': 'No provider is configured, so the raw transcript is shown.',
+}
+
+function fallbackLabel(): string {
+  const reason = fallbackReason.value
+  if (!reason) return ''
+  return (
+    FALLBACK_LABELS[reason] ?? 'Cleanup did not produce text, so the raw transcript is shown.'
+  )
+}
+
+async function handleClean(): Promise<void> {
+  const providerId = selectedProviderId.value
+  if (!providerId) return
+  await cleanTranscript(providerId, lastTranscript.value)
+}
+
 const isModelDownloading = computed(() => isModelLoading.value && downloadProgress.value !== null)
 
 function modelStatusText(status: ModelStatus | null): string {
@@ -59,8 +96,9 @@ function modelStatusText(status: ModelStatus | null): string {
   return status.Error.message
 }
 
-// Load devices on mount.
+// Load devices and providers on mount.
 loadDevices().catch(() => {})
+refreshProviders().catch(() => {})
 </script>
 
 <template>
@@ -165,6 +203,59 @@ loadDevices().catch(() => {})
       <div class="transcript-output" :class="{ empty: lastTranscript.length === 0 }">
         {{ lastTranscript || 'No transcript yet.' }}
       </div>
+    </section>
+
+    <!-- Dictation cleanup section (build-plan item 7) -->
+    <section class="cleanup-section">
+      <h2>Dictation Cleanup</h2>
+
+      <div v-if="providers.length === 0" class="status">
+        No providers configured yet. Add one in the LLM Providers section below.
+      </div>
+
+      <template v-else>
+        <div class="device-selector">
+          <label for="cleanup-provider">Provider:</label>
+          <select
+            id="cleanup-provider"
+            :value="selectedProviderId ?? ''"
+            @change="selectedProviderId = ($event.target as HTMLSelectElement).value || null"
+          >
+            <option value="" disabled>-- Select a provider --</option>
+            <option v-for="provider in providers" :key="provider.id" :value="provider.id">
+              {{ provider.name }}
+            </option>
+          </select>
+        </div>
+
+        <div class="controls">
+          <button
+            class="btn btn-primary"
+            :disabled="
+              cleanupState === 'cleaning' || lastTranscript.trim() === '' || !selectedProviderId
+            "
+            @click="handleClean"
+          >
+            {{ cleanupState === 'cleaning' ? 'Cleaning...' : 'Clean Transcript' }}
+          </button>
+        </div>
+
+        <p class="hint">
+          Pick a provider and press Clean Transcript to rewrite the transcript
+          above: fillers, repetitions, and false starts removed, punctuation and
+          capitalization added, meaning preserved.
+        </p>
+
+        <div class="transcript-output" :class="{ empty: cleanedText.length === 0 }">
+          {{ cleanedText || 'No cleaned text yet.' }}
+        </div>
+
+        <p v-if="isFallback" class="fallback-note">{{ fallbackLabel() }}</p>
+
+        <div v-if="cleanupError" class="error-display">
+          <p class="error-text">{{ cleanupError }}</p>
+        </div>
+      </template>
     </section>
 
     <!-- Settings (from feature 1) -->
@@ -339,5 +430,25 @@ loadDevices().catch(() => {})
 
 .transcript-output.empty {
   opacity: 0.6;
+}
+
+.cleanup-section {
+  width: 100%;
+  max-width: 480px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.cleanup-section h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: var(--text-h);
+}
+
+.fallback-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #b45309;
 }
 </style>
