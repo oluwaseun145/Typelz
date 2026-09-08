@@ -1,4 +1,5 @@
 mod audio;
+mod llm;
 mod model;
 mod providers;
 mod transcribe;
@@ -7,6 +8,7 @@ mod vad;
 use std::sync::{mpsc, Arc, Mutex};
 
 use cpal::traits::HostTrait;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 
@@ -275,8 +277,10 @@ pub fn run() {
         model_cache: Mutex::new(None),
         transcription_engine: Arc::new(Mutex::new(None)),
     })
-    .manage(Arc::new(providers::KeyringCredentialStore) as Arc<dyn providers::CredentialStore>)
-    .setup(|_app| {
+    .setup(|app| {
+      let fallback = providers::FallbackCredentialStore::new(app.handle())
+        .expect("Could not initialize the credential store");
+      app.manage(Arc::new(fallback) as Arc<dyn providers::CredentialStore>);
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -293,6 +297,7 @@ pub fn run() {
         providers::remove_provider,
         providers::validate_provider,
         providers::test_provider_credentials,
+        llm::send_chat_completion,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

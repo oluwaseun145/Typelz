@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, reactive, ref } from 'vue'
 import { useProviders } from '../../composables/useProviders'
+import { useChatCompletion } from '../../composables/useChatCompletion'
 import {
   validateAddForm,
   validateEditForm,
@@ -13,6 +14,7 @@ type Mode = 'list' | 'add' | 'edit'
 type RowStatus = { checking: true } | { checking: false; ok: boolean; message: string }
 
 const { providers, loading, error, refresh, add, update, remove, validate, test } = useProviders()
+const { sendCompletion, loading: chatLoading, error: chatError } = useChatCompletion()
 
 const mode = ref<Mode>('list')
 const editingId = ref<string | null>(null)
@@ -22,6 +24,7 @@ const saving = ref(false)
 const testResult = ref<{ ok: boolean; message: string } | null>(null)
 const fieldErrors = ref<ProviderFormErrors>({})
 const rowStatus = ref<Record<string, RowStatus>>({})
+const chatResult = ref<Record<string, string>>({})
 
 const form = reactive({
   name: '',
@@ -204,6 +207,24 @@ async function removeProvider(provider: ProviderSummary): Promise<void> {
   await remove(provider.id)
   rowStatus.value = {}
 }
+
+async function runChatTest(provider: ProviderSummary): Promise<void> {
+  chatResult.value = { ...chatResult.value, [provider.id]: 'Sending...' }
+  const response = await sendCompletion(provider.id, [
+    { role: 'user', content: 'Say hello in one sentence.' },
+  ])
+  if (response) {
+    chatResult.value = {
+      ...chatResult.value,
+      [provider.id]: response.choices[0]?.message?.content ?? 'No response content',
+    }
+  } else {
+    chatResult.value = {
+      ...chatResult.value,
+      [provider.id]: chatError.value ?? 'Chat completion failed',
+    }
+  }
+}
 </script>
 
 <template>
@@ -233,6 +254,13 @@ async function removeProvider(provider: ProviderSummary): Promise<void> {
               >
                 {{ rowChecking(provider.id) ? 'Checking...' : 'Test' }}
               </button>
+              <button
+                class="row-btn"
+                :disabled="chatLoading || saving || !provider.has_key"
+                @click="runChatTest(provider)"
+              >
+                {{ chatLoading && chatResult[provider.id] === 'Sending...' ? 'Chatting...' : 'Chat' }}
+              </button>
               <button class="row-btn" :disabled="saving || mode !== 'list'" @click="openEditForm(provider)">
                 Edit
               </button>
@@ -252,6 +280,9 @@ async function removeProvider(provider: ProviderSummary): Promise<void> {
             :class="rowResultOk(provider.id) ? 'ok' : 'fail'"
           >
             {{ rowResultText(provider.id) }}
+          </p>
+          <p v-if="chatResult[provider.id]" class="row-result chat-result">
+            {{ chatResult[provider.id] }}
           </p>
         </li>
       </ul>
@@ -496,6 +527,11 @@ async function removeProvider(provider: ProviderSummary): Promise<void> {
 
 .row-result.fail {
   color: #e53e3e;
+}
+
+.chat-result {
+  color: var(--accent);
+  font-style: italic;
 }
 
 .list-actions {

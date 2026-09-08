@@ -82,9 +82,28 @@ pub struct KeyringCredentialStore;
 
 impl CredentialStore for KeyringCredentialStore {
     fn set(&self, provider_id: &str, api_key: &str) -> Result<(), String> {
-        entry_for(provider_id)?.set_password(api_key).map_err(|e| {
-            format!("Could not save the API key to the system credential store: {e}")
-        })
+        entry_for(provider_id)?
+            .set_password(api_key)
+            .map_err(|e| {
+                format!("Could not save the API key to the system credential store: {e}")
+            })?;
+
+        // Read-back verification: confirm the keychain actually persisted the
+        // credential. On Windows, set_password can appear to succeed while the
+        // credential does not survive an app restart.
+        match entry_for(provider_id)?.get_password() {
+            Ok(reflected) if reflected == api_key => Ok(()),
+            Ok(_) => Err(
+                "The API key was saved but could not be read back from the system \
+                 credential store. The key may not persist after a restart. \
+                 Try saving again or check your OS credential manager."
+                    .to_string(),
+            ),
+            Err(e) => Err(format!(
+                "The API key was saved but the system credential store returned an \
+                 error on read-back: {e}. The key may not persist after a restart."
+            )),
+        }
     }
 
     fn get(&self, provider_id: &str) -> Result<Option<String>, String> {
@@ -111,6 +130,111 @@ impl CredentialStore for KeyringCredentialStore {
 fn entry_for(provider_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(CREDENTIAL_SERVICE, provider_id)
         .map_err(|e| format!("Could not create a credential store entry: {e}"))
+}
+
+const CREDENTIALS_FILE: &str = "credentials.json";
+
+/// Credential store that tries the OS keychain first and falls back to a
+/// local file when the keychain write fails or does not persist. The file
+/// uses base64 obfuscation (not encryption) to keep keys out of plaintext;
+/// it is a v1 convenience, not a security boundary.
+pub struct FallbackCredentialStore {
+    keychain: KeyringCredentialStore,
+    file_path: PathBuf,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CredentialFile {
+    entries: std::collections::HashMap<String, String>,
+}
+
+impl FallbackCredentialStore {
+    pub fn new(app: &tauri::AppHandle) -> Result<Self, String> {
+        let file_path = app
+            .path()
+            .resolve(CREDENTIALS_FILE, tauri::path::BaseDirectory::Config)
+            .map_err(|e| format!("Could not resolve credentials file path: {e}"))?;
+        Ok(Self {
+            keychain: KeyringCredentialStore,
+            file_path,
+        })
+    }
+
+    fn load_file(&self) -> CredentialFile {
+        std::fs::read(&self.file_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_file(&self, data: &CredentialFile) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(data)
+            .map_err(|e| format!("Could not encode credentials: {e}"))?;
+        std::fs::write(&self.file_path, json)
+            .map_err(|e| format!("Could not write credentials file: {e}"))
+    }
+
+    fn obfuscate(plain: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(plain.as_bytes())
+    }
+
+    fn deobfuscate(encoded: &str) -> Option<String> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    }
+}
+
+impl CredentialStore for FallbackCredentialStore {
+    fn set(&self, provider_id: &str, api_key: &str) -> Result<(), String> {
+        // Try the OS keychain first.
+        let keychain_ok = self.keychain.set(provider_id, api_key).is_ok();
+
+        // Always persist to the file as a backup so the key survives even if
+        // the keychain silently drops it on restart.
+        let mut data = self.load_file();
+        data.entries
+            .insert(provider_id.to_string(), Self::obfuscate(api_key));
+        self.save_file(&data)?;
+
+        // The file write succeeded, so the key is stored. If the keychain also
+        // worked, great. If not, the file is the backup and the key will be
+        // retrieved from there on the next read.
+        if !keychain_ok {
+            log::warn!(
+                "API key for provider {provider_id} was saved to the local backup file \
+                 because the system credential store is unavailable."
+            );
+        }
+        Ok(())
+    }
+
+    fn get(&self, provider_id: &str) -> Result<Option<String>, String> {
+        // Try the OS keychain first.
+        match self.keychain.get(provider_id) {
+            Ok(Some(key)) => return Ok(Some(key)),
+            Ok(None) => {}
+            Err(_) => {}
+        }
+
+        // Fall back to the file.
+        let data = self.load_file();
+        Ok(data
+            .entries
+            .get(provider_id)
+            .and_then(|encoded| Self::deobfuscate(encoded)))
+    }
+
+    fn delete(&self, provider_id: &str) -> Result<(), String> {
+        // Best-effort delete from both stores.
+        let _ = self.keychain.delete(provider_id);
+        let mut data = self.load_file();
+        data.entries.remove(provider_id);
+        self.save_file(&data)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
